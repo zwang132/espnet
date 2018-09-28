@@ -207,7 +207,7 @@ if [ ${stage} -le 3 ]; then
         --maxlen ${lm_maxlen} \
         --dict ${dict}
 fi
-
+echo "Stage 3" && exit 1
 if [ ${stage} -le 4 ]; then
     echo "stage 4: Network Training"
     ${cuda_cmd} --gpu ${ngpu} ${expdir}/train.log \
@@ -242,7 +242,7 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs}
 fi
-echo "Stage 4" && exit 1
+
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32

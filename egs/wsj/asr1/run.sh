@@ -7,9 +7,9 @@
 . ./cmd.sh
 
 # general configuration
-backend=chainer
+backend=pytorch
 stage=0        # start from 0 if you need to start from data preparation
-ngpu=0         # number of gpus ("0" uses cpu, otherwise use gpu)
+ngpu=1         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
@@ -22,7 +22,7 @@ do_delta=false
 
 # network architecture
 # encoder related
-etype=vggblstmp     # encoder architecture type
+etype=vggblstm     # encoder architecture type
 elayers=6
 eunits=320
 eprojs=320
@@ -192,7 +192,6 @@ mkdir -p ${lmexpdir}
 
 if [ ${stage} -le 3 ]; then
     echo "stage 3: LM Preparation"
-    mkdir -p ${lmdatadir}
     
     if [ $use_wordlm = true ]; then
         lmdatadir=data/local/wordlm_train
@@ -298,7 +297,7 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs}
 fi
-
+echo "Stage 4" && exit 1
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32
