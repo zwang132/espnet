@@ -85,7 +85,7 @@ set -o pipefail
 
 train_set=train_trim
 train_dev=dev_trim
-recog_set="dev test"
+recog_set="dev_new test"
 
 if [ ${stage} -le -1 ]; then
     echo "stage -1: Data Download"
@@ -98,8 +98,13 @@ if [ ${stage} -le 0 ]; then
     echo "stage 0: Data preparation"
     local/prepare_data.sh
     for dset in dev test train; do
-    utils/data/modify_speaker_info.sh --seconds-per-spk-max 180 data/${dset}.orig data/${dset}
+        utils/data/modify_speaker_info.sh --seconds-per-spk-max 180 data/${dset}.orig data/${dset}
     done
+    ### Extract 9k sentences from training set to make dev
+    utils/subset_data_dir.sh --first data/train 9000 data/dev_extract
+    n=$[`cat data/train/text | wc -l` - 9000]
+    utils/subset_data_dir.sh --last data/train $n data/train_new
+    utils/combine_data.sh data/dev_new data/dev data/dev_extract
 fi
 
 feat_tr_dir=${dumpdir}/${train_set}/delta${do_delta}; mkdir -p ${feat_tr_dir}
@@ -110,24 +115,24 @@ if [ ${stage} -le 1 ]; then
     echo "stage 1: Feature Generation"
     fbankdir=fbank
     # Generate the fbank features; by default 80-dimensional fbanks with pitch on each frame
-    for x in test dev train; do
+    for x in test dev_new train_new; do
         steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
             data/${x} exp/make_fbank/${x} ${fbankdir}
     done
 
     # remove utt having more than 2000 frames or less than 10 frames or
     # remove utt having more than 400 characters or no more than 0 characters
-    remove_longshortdata.sh --maxchars 400 data/train data/${train_set}
-    remove_longshortdata.sh --maxchars 400 data/dev data/${train_dev}
+    remove_longshortdata.sh --maxchars 400 data/train_new data/${train_set}
+    remove_longshortdata.sh --maxchars 400 data/dev_new data/${train_dev}
 
     # compute global CMVN
     compute-cmvn-stats scp:data/${train_set}/feats.scp data/${train_set}/cmvn.ark
 
     # dump features for training
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
-        data/${train_set}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/train ${feat_tr_dir}
+        data/${train_set}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/${train_set} ${feat_tr_dir}
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
-        data/${train_dev}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/dev ${feat_dt_dir}
+        data/${train_dev}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/${train_dev} ${feat_dt_dir}
     for rtask in ${recog_set}; do
         feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}; mkdir -p ${feat_recog_dir}
         dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
@@ -207,7 +212,7 @@ if [ ${stage} -le 3 ]; then
         --maxlen ${lm_maxlen} \
         --dict ${dict}
 fi
-echo "Stage 3" && exit 1
+
 if [ ${stage} -le 4 ]; then
     echo "stage 4: Network Training"
     ${cuda_cmd} --gpu ${ngpu} ${expdir}/train.log \
@@ -242,7 +247,7 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs}
 fi
-
+echo "Stage 4" && exit 1
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32
@@ -283,4 +288,3 @@ if [ ${stage} -le 5 ]; then
     wait
     echo "Finished"
 fi
-

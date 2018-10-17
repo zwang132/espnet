@@ -14,6 +14,8 @@ import json
 import logging
 import numpy as np
 import six
+import sys
+import random
 
 import torch
 import torch.nn as nn
@@ -31,6 +33,7 @@ from lm_utils import count_tokens
 from lm_utils import MakeSymlinkToBestModel
 from lm_utils import ParallelSentenceIterator
 from lm_utils import read_tokens
+from lm_utils import negate_gradient
 
 from asr_utils import torch_load
 from asr_utils import torch_resume
@@ -183,11 +186,12 @@ def concat_examples(batch, device=None, padding=None):
 
 class BPTTUpdater(training.StandardUpdater):
 
-    def __init__(self, train_iter, model, optimizer, device, gradclip=None):
+    def __init__(self, train_iter, model, optimizer, device, gradclip=None, error_weight=None):
         super(BPTTUpdater, self).__init__(train_iter, optimizer)
         self.model = model
         self.device = device
         self.gradclip = gradclip
+        self.error_weight = error_weight
 
     # The core part of the update routine can be customized by overriding.
     def update_core(self):
@@ -195,9 +199,15 @@ class BPTTUpdater(training.StandardUpdater):
         # they are automatically named 'main'.
         train_iter = self.get_iterator('main')
         optimizer = self.get_optimizer('main')
+        if self.error_weight is not None:
+            error_iter = self.get_iterator('error')
+            error_optimizer = self.get_optimizer('error')
         # Progress the dataset iterator for sentences at each iteration.
         batch = train_iter.__next__()
         x, t = concat_examples(batch, device=self.device, padding=(0, -100))
+        if self.error_weight is not None:
+            batch_error = error_iter.__next__()
+            x_error, t_error = concat_examples(batch_error, device=self.device, padding=(0, -100))
         # Concatenate the token IDs to matrices and send them to the device
         # self.converter does this job
         # (it is chainer.dataset.concat_examples by default)
@@ -214,6 +224,7 @@ class BPTTUpdater(training.StandardUpdater):
 
         reporter.report({'loss': float(loss.detach())}, optimizer.target)
         reporter.report({'count': count}, optimizer.target)
+
         # update
         loss = loss / batch_size  # normalized by batch size
         self.model.zero_grad()  # Clear the parameter gradients
@@ -221,6 +232,31 @@ class BPTTUpdater(training.StandardUpdater):
         if self.gradclip is not None:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.gradclip)
         optimizer.step()  # Update the parameters
+
+        if self.error_weight is not None:
+            assert (self.error_weight < 0), "Error_weight is non negative."
+            loss_error = 0
+            count_error = 0
+            state = None
+            error_batch_size, sequence_length = x_error.shape
+            for i in six.moves.range(sequence_length):
+                # Compute the loss at this time step and accumulate it
+                state, loss_batch = self.model(state, x_error[:, i], t_error[:, i])
+                non_zeros = torch.sum(x_error[:, i] != 0, dtype=torch.float)
+                loss_error += loss_batch * non_zeros
+                count_error += int(non_zeros)
+
+            # update
+            loss_error = loss_error / error_batch_size
+            self.model.zero_grad()  # Clear the parameter gradients
+            loss_error.backward()
+            if self.gradclip is not None:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.gradclip)
+
+            # Negate the gradients
+            negate_gradient(self.model.parameters(), self.error_weight)
+            # Step in new grad direction
+            error_optimizer.step()  # Update the parameters
 
 
 class LMEvaluator(extensions.Evaluator):
@@ -281,9 +317,13 @@ def train(args):
     # read tokens as a sequence of sentences
     train = read_tokens(args.train_label, args.char_list_dict)
     val = read_tokens(args.valid_label, args.char_list_dict)
+    if args.error_label != '':
+        error = read_tokens(args.error_label,args.char_list_dict)
     # count tokens
     n_train_tokens, n_train_oovs = count_tokens(train, unk)
     n_val_tokens, n_val_oovs = count_tokens(val, unk)
+    if args.error_label != '':
+        n_error_tokens, n_error_oovs = count_tokens(error, unk)
     logging.info('#vocab = ' + str(args.n_vocab))
     logging.info('#sentences in the training data = ' + str(len(train)))
     logging.info('#tokens in the training data = ' + str(n_train_tokens))
@@ -291,13 +331,30 @@ def train(args):
     logging.info('#sentences in the validation data = ' + str(len(val)))
     logging.info('#tokens in the validation data = ' + str(n_val_tokens))
     logging.info('oov rate in the validation data = %.2f %%' % (n_val_oovs / n_val_tokens * 100))
+    if args.error_label != '':
+        logging.info('#sentences in the error data = ' + str(len(error)))
+        logging.info('#tokens in the error data = ' + str(n_error_tokens))
+        logging.info('oov rate in the error data = %.2f %%' % (n_error_oovs / n_error_tokens * 100))
 
     # Create the dataset iterators
-    train_iter = ParallelSentenceIterator(train, args.batchsize,
-                                          max_length=args.maxlen, sos=eos, eos=eos)
+    if args.error_label != '':
+        seed_num = random.randint(-sys.maxint-1, sys.maxint)
+        train_iter = ParallelSentenceIterator(train, args.batchsize,
+                                              max_length=args.maxlen, sos=eos, eos=eos, Order=seed_num)
+    else:
+        train_iter = ParallelSentenceIterator(train, args.batchsize,
+                                              max_length=args.maxlen, sos=eos, eos=eos)
     val_iter = ParallelSentenceIterator(val, args.batchsize,
                                         max_length=args.maxlen, sos=eos, eos=eos, repeat=False)
+    if args.error_label != '':
+        error_batchsize = int(float(len(error))/len(train) * args.batchsize)
+        if error_batchsize == 0:
+            error_batchsize = 1
+        error_iter = ParallelSentenceIterator(error, error_batchsize,
+                                              max_length=args.maxlen, sos=eos, eos=eos, Order=seed_num)
     logging.info('#iterations per epoch = ' + str(len(train_iter.batch_indices)))
+    if args.error_label != '':
+        logging.info('#iterations per epoch of error sentences = ' + str(len(error_iter.batch_indices)))
     logging.info('#total iterations = ' + str(args.epoch * len(train_iter.batch_indices)))
     # Prepare an RNNLM model
     rnn = RNNLM(args.n_vocab, args.layer, args.unit)
@@ -320,13 +377,26 @@ def train(args):
         optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
     elif args.opt == 'adam':
         optimizer = torch.optim.Adam(model.parameters())
+    if args.error_label != '':
+        if args.error_opt == 'sgd':
+            error_optimizer = torch.optim.SGD(model.parameters(), lr=args.error_lr)
+        elif args.error_opt == 'adam':
+            error_optimizer = torch.optim.Adam(model.parameters())
 
     # FIXME: TOO DIRTY HACK
     reporter = model.reporter
     setattr(optimizer, "target", reporter)
     setattr(optimizer, "serialize", lambda s: reporter.serialize(s))
+    if args.error_label != '':
+        setattr(error_optimizer, "target", reporter)
+        setattr(error_optimizer, "serialize", lambda s: reporter.serialize(s))
 
-    updater = BPTTUpdater(train_iter, model, optimizer, gpu_id, gradclip=args.gradclip)
+    if args.error_label != '':
+        updater = BPTTUpdater({'main':train_iter,'error':error_iter}, model,
+                              {'main':optimizer,'error':error_optimizer},
+                              gpu_id, gradclip=args.gradclip, error_weight=args.error_weight)
+    else:
+        updater = BPTTUpdater(train_iter, model, optimizer, gpu_id, gradclip=args.gradclip)
     trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=args.outdir)
     trainer.extend(LMEvaluator(val_iter, model, reporter, device=gpu_id))
     trainer.extend(extensions.LogReport(postprocess=compute_perplexity,

@@ -51,7 +51,7 @@ epochs=15
 lm_layers=2
 lm_units=650
 lm_opt=sgd        # or adam
-lm_batchsize=1024 # batch size in LM training
+lm_batchsize=512 # batch size in LM training
 lm_epochs=20      # if the data size is large, we can reduce this
 lm_maxlen=150     # if sentence length > lm_maxlen, lm_batchsize is automatically reduced
 lm_resume=        # specify a snapshot file to resume LM training
@@ -85,7 +85,7 @@ set -o pipefail
 
 train_set=train_trim
 train_dev=dev_trim
-recog_set="dev test"
+recog_set="dev test train"
 
 if [ ${stage} -le -1 ]; then
     echo "stage -1: Data Download"
@@ -242,7 +242,7 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs}
 fi
-echo "Stage 4" && exit 1
+
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32

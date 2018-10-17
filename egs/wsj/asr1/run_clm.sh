@@ -8,38 +8,45 @@
 
 # general configuration
 backend=pytorch
-stage=0       # start from -1 if you need to start from data download
+stage=0        # start from 0 if you need to start from data preparation
 ngpu=1         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
 verbose=0      # verbose option
 resume=        # Resume the training from snapshot
+seed=1
 
 # feature configuration
 do_delta=false
 
-# network archtecture
+# network architecture
 # encoder related
 etype=vggblstm     # encoder architecture type
-elayers=5
-eunits=1024
-eprojs=1024
+elayers=6
+eunits=320
+eprojs=320
 subsample=1_2_2_1_1 # skip every n frame from input to nth layers
 # decoder related
-dlayers=2
-dunits=1024
+dlayers=1
+dunits=300
 # attention related
 atype=location
-adim=1024
+adim=320
+awin=5
+aheads=4
 aconv_chans=10
 aconv_filts=100
 
 # hybrid CTC/attention
-mtlalpha=0.5
+mtlalpha=0.2
+
+# label smoothing
+lsm_type=unigram
+lsm_weight=0.05
 
 # minibatch related
-batchsize=15
+batchsize=30
 maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduced
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
@@ -48,18 +55,20 @@ opt=adadelta
 epochs=15
 
 # rnnlm related
-lm_layers=2
-lm_units=650
-lm_opt=sgd        # or adam
-lm_batchsize=512 # batch size in LM training
-lm_epochs=20      # if the data size is large, we can reduce this
-lm_maxlen=150     # if sentence length > lm_maxlen, lm_batchsize is automatically reduced
-lm_resume=        # specify a snapshot file to resume LM training
-lmtag=            # tag for managing LMs
+use_wordlm=false    # false means to train/use a character LM
+lm_vocabsize=65000  # effective only for word LMs
+lm_layers=2         # 2 for character LMs
+lm_units=650        # 650 for character LMs
+lm_opt=adam         # adam for character LMs
+lm_batchsize=512    # 1024 for character LMs
+lm_epochs=20        # number of epochs
+lm_maxlen=150       # 150 for character LMs
+lm_resume=          # specify a snapshot file to resume LM training
+lmtag=              # tag for managing LMs
 
 # decoding parameter
 lm_weight=1.0
-beam_size=20
+beam_size=30
 penalty=0.0
 maxlenratio=0.0
 minlenratio=0.0
@@ -68,6 +77,10 @@ recog_model=model.acc.best # set a model to be used for decoding: 'model.acc.bes
 
 # scheduled sampling option
 samp_prob=0.0
+
+# data
+wsj0=/export/corpora5/LDC/LDC93S6B
+wsj1=/export/corpora5/LDC/LDC94S13B
 
 # exp tag
 tag="" # tag for managing experiments.
@@ -83,23 +96,17 @@ set -e
 set -u
 set -o pipefail
 
-train_set=train_trim
-train_dev=dev_trim
-recog_set="dev test"
-
-if [ ${stage} -le -1 ]; then
-    echo "stage -1: Data Download"
-    local/download_data.sh
-fi
+train_set=train_si284
+train_dev=test_dev93
+train_test=test_eval92
+recog_set="test_dev93 test_eval92 train_si284"
 
 if [ ${stage} -le 0 ]; then
     ### Task dependent. You have to make data the following preparation part by yourself.
     ### But you can utilize Kaldi recipes in most cases
     echo "stage 0: Data preparation"
-    local/prepare_data.sh
-    for dset in dev test train; do
-    utils/data/modify_speaker_info.sh --seconds-per-spk-max 180 data/${dset}.orig data/${dset}
-    done
+    local/wsj_data_prep.sh ${wsj0}/??-{?,??}.? ${wsj1}/??-{?,??}.?
+    local/wsj_format_data.sh
 fi
 
 feat_tr_dir=${dumpdir}/${train_set}/delta${do_delta}; mkdir -p ${feat_tr_dir}
@@ -110,82 +117,109 @@ if [ ${stage} -le 1 ]; then
     echo "stage 1: Feature Generation"
     fbankdir=fbank
     # Generate the fbank features; by default 80-dimensional fbanks with pitch on each frame
-    for x in test dev train; do
-        steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 32 --write_utt2num_frames true \
+    for x in train_si284 test_dev93 test_eval92; do
+        steps/make_fbank_pitch.sh --cmd "$train_cmd" --nj 10 --write_utt2num_frames true \
             data/${x} exp/make_fbank/${x} ${fbankdir}
     done
-
-    # remove utt having more than 2000 frames or less than 10 frames or
-    # remove utt having more than 400 characters or no more than 0 characters
-    remove_longshortdata.sh --maxchars 400 data/train data/${train_set}
-    remove_longshortdata.sh --maxchars 400 data/dev data/${train_dev}
 
     # compute global CMVN
     compute-cmvn-stats scp:data/${train_set}/feats.scp data/${train_set}/cmvn.ark
 
     # dump features for training
+    if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d ${feat_tr_dir}/storage ]; then
+    utils/create_split_dir.pl \
+        /export/b{10,11,12,13}/${USER}/espnet-data/egs/wsj/asr1/dump/${train_set}/delta${do_delta}/storage \
+        ${feat_tr_dir}/storage
+    fi
+    if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d ${feat_dt_dir}/storage ]; then
+    utils/create_split_dir.pl \
+        /export/b{10,11,12,13}/${USER}/espnet-data/egs/wsj/asr1/dump/${train_dev}/delta${do_delta}/storage \
+        ${feat_dt_dir}/storage
+    fi
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
         data/${train_set}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/train ${feat_tr_dir}
-    dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
+    dump.sh --cmd "$train_cmd" --nj 4 --do_delta $do_delta \
         data/${train_dev}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/dev ${feat_dt_dir}
     for rtask in ${recog_set}; do
         feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}; mkdir -p ${feat_recog_dir}
-        dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
+        dump.sh --cmd "$train_cmd" --nj 4 --do_delta $do_delta \
             data/${rtask}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/recog/${rtask} \
             ${feat_recog_dir}
     done
 fi
 
 dict=data/lang_1char/${train_set}_units.txt
+nlsyms=data/lang_1char/non_lang_syms.txt
+
 echo "dictionary: ${dict}"
 if [ ${stage} -le 2 ]; then
     ### Task dependent. You have to check non-linguistic symbols used in the corpus.
     echo "stage 2: Dictionary and Json Data Preparation"
     mkdir -p data/lang_1char/
+
+    echo "make a non-linguistic symbol list"
+    cut -f 2- data/${train_set}/text | tr " " "\n" | sort | uniq | grep "<" > ${nlsyms}
+    cat ${nlsyms}
+
+    echo "make a dictionary"
     echo "<unk> 1" > ${dict} # <unk> must be 1, 0 will be used for "blank" in CTC
-    text2token.py -s 1 -n 1 data/${train_set}/text | cut -f 2- -d" " | tr " " "\n" \
+    text2token.py -s 1 -n 1 -l ${nlsyms} data/${train_set}/text | cut -f 2- -d" " | tr " " "\n" \
     | sort | uniq | grep -v -e '^\s*$' | awk '{print $0 " " NR+1}' >> ${dict}
     wc -l ${dict}
 
-    # make json labels
-    data2json.sh --feat ${feat_tr_dir}/feats.scp \
+    echo "make json files"
+    data2json.sh --feat ${feat_tr_dir}/feats.scp --nlsyms ${nlsyms} \
          data/${train_set} ${dict} > ${feat_tr_dir}/data.json
-    data2json.sh --feat ${feat_dt_dir}/feats.scp \
+    data2json.sh --feat ${feat_dt_dir}/feats.scp --nlsyms ${nlsyms} \
          data/${train_dev} ${dict} > ${feat_dt_dir}/data.json
     for rtask in ${recog_set}; do
         feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}
         data2json.sh --feat ${feat_recog_dir}/feats.scp \
-            data/${rtask} ${dict} > ${feat_recog_dir}/data.json
+            --nlsyms ${nlsyms} data/${rtask} ${dict} > ${feat_recog_dir}/data.json
     done
 fi
 
-if [ -z ${tag} ]; then
-    expdir=exp/${train_set}_${backend}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_adim${adim}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_sampprob${samp_prob}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}
-    if ${do_delta}; then
-        expdir=${expdir}_delta
-    fi
-else
-    expdir=exp/${train_set}_${backend}_${tag}
-fi
-mkdir -p ${expdir}
-
-# It takes a few days. If you just want to end-to-end ASR without LM,
+# It takes about one day. If you just want to do end-to-end ASR without LM,
 # you can skip this and remove --rnnlm option in the recognition (stage 5)
 if [ -z ${lmtag} ]; then
     lmtag=${lm_layers}layer_unit${lm_units}_${lm_opt}_bs${lm_batchsize}
+    if [ $use_wordlm = true ]; then
+        lmtag=${lmtag}_word${lm_vocabsize}
+    fi
 fi
 lmexpdir=exp/train_rnnlm_${backend}_${lmtag}
 mkdir -p ${lmexpdir}
 
 if [ ${stage} -le 3 ]; then
     echo "stage 3: LM Preparation"
-    lmdatadir=data/local/lm_train
-    [ ! -e ${lmdatadir} ] && mkdir -p ${lmdatadir}
-    gunzip -c db/TEDLIUM_release2/LM/*.en.gz | sed 's/ <\/s>//g' | local/join_suffix.py \
-        | text2token.py -n 1 \
-        > ${lmdatadir}/train.txt
-    text2token.py -s 1 -n 1 data/dev/text | cut -f 2- -d" " \
-        > ${lmdatadir}/valid.txt
+    
+    if [ $use_wordlm = true ]; then
+        lmdatadir=data/local/wordlm_train
+        lmdict=${lmdatadir}/wordlist_${lm_vocabsize}.txt
+        mkdir -p ${lmdatadir}
+        cat data/${train_set}/text | cut -f 2- -d" " > ${lmdatadir}/train_trans.txt
+        zcat ${wsj1}/13-32.1/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
+                | grep -v "<" | tr [a-z] [A-Z] > ${lmdatadir}/train_others.txt
+        cat data/${train_dev}/text | cut -f 2- -d" " > ${lmdatadir}/valid.txt
+        cat data/${train_test}/text | cut -f 2- -d" " > ${lmdatadir}/test.txt
+        cat ${lmdatadir}/train_trans.txt ${lmdatadir}/train_others.txt > ${lmdatadir}/train.txt
+        text2vocabulary.py -s ${lm_vocabsize} -o ${lmdict} ${lmdatadir}/train.txt
+    else
+        lmdatadir=data/local/lm_train
+        lmdict=$dict
+        mkdir -p ${lmdatadir}
+        text2token.py -s 1 -n 1 -l ${nlsyms} data/${train_set}/text \
+            | cut -f 2- -d" " > ${lmdatadir}/train_trans.txt
+        zcat ${wsj1}/13-32.1/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
+            | grep -v "<" | tr [a-z] [A-Z] \
+            | text2token.py -n 1 | cut -f 2- -d" " > ${lmdatadir}/train_others.txt
+        text2token.py -s 1 -n 1 -l ${nlsyms} data/${train_dev}/text \
+            | cut -f 2- -d" " > ${lmdatadir}/valid.txt
+        text2token.py -s 1 -n 1 -l ${nlsyms} data/${train_test}/text \
+                | cut -f 2- -d" " > ${lmdatadir}/test.txt
+        cat ${lmdatadir}/train_trans.txt ${lmdatadir}/train_others.txt > ${lmdatadir}/train.txt
+    fi
+
     # use only 1 gpu
     if [ ${ngpu} -gt 1 ]; then
         echo "LM training does not support multi-gpu. signle gpu will be used."
@@ -198,6 +232,7 @@ if [ ${stage} -le 3 ]; then
         --outdir ${lmexpdir} \
         --train-label ${lmdatadir}/train.txt \
         --valid-label ${lmdatadir}/valid.txt \
+        --test-label ${lmdatadir}/test.txt \
         --resume ${lm_resume} \
         --layer ${lm_layers} \
         --unit ${lm_units} \
@@ -205,11 +240,26 @@ if [ ${stage} -le 3 ]; then
         --batchsize ${lm_batchsize} \
         --epoch ${lm_epochs} \
         --maxlen ${lm_maxlen} \
-        --dict ${dict}
+        --dict ${lmdict}
 fi
-echo "Stage 3" && exit 1
+
+
+if [ -z ${tag} ]; then
+    expdir=exp/${train_set}_${backend}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_sampprob${samp_prob}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}
+    if [ "${lsm_type}" != "" ]; then
+        expdir=${expdir}_lsm${lsm_type}${lsm_weight}
+    fi
+    if ${do_delta}; then
+        expdir=${expdir}_delta
+    fi
+else
+    expdir=exp/${train_set}_${backend}_${tag}
+fi
+mkdir -p ${expdir}
+
 if [ ${stage} -le 4 ]; then
     echo "stage 4: Network Training"
+
     ${cuda_cmd} --gpu ${ngpu} ${expdir}/train.log \
         asr_train.py \
         --ngpu ${ngpu} \
@@ -221,6 +271,7 @@ if [ ${stage} -le 4 ]; then
         --minibatches ${N} \
         --verbose ${verbose} \
         --resume ${resume} \
+        --seed ${seed} \
         --train-json ${feat_tr_dir}/data.json \
         --valid-json ${feat_dt_dir}/data.json \
         --etype ${etype} \
@@ -232,9 +283,13 @@ if [ ${stage} -le 4 ]; then
         --dunits ${dunits} \
         --atype ${atype} \
         --adim ${adim} \
+        --awin ${awin} \
+        --aheads ${aheads} \
         --aconv-chans ${aconv_chans} \
         --aconv-filts ${aconv_filts} \
         --mtlalpha ${mtlalpha} \
+        --lsm-type ${lsm_type} \
+        --lsm-weight ${lsm_weight} \
         --batch-size ${batchsize} \
         --maxlen-in ${maxlen_in} \
         --maxlen-out ${maxlen_out} \
@@ -250,6 +305,14 @@ if [ ${stage} -le 5 ]; then
     for rtask in ${recog_set}; do
     (
         decode_dir=decode_${rtask}_beam${beam_size}_e${recog_model}_p${penalty}_len${minlenratio}-${maxlenratio}_ctcw${ctc_weight}_rnnlm${lm_weight}_${lmtag}
+        if [ $use_wordlm = true ]; then
+            recog_opts="--word-rnnlm ${lmexpdir}/rnnlm.model.best"
+        else
+            recog_opts="--rnnlm ${lmexpdir}/rnnlm.model.best"
+        fi
+        if [ $lm_weight == 0 ]; then
+            recog_opts=""
+        fi
         feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}
 
         # split data
@@ -262,8 +325,6 @@ if [ ${stage} -le 5 ]; then
             asr_recog.py \
             --ngpu ${ngpu} \
             --backend ${backend} \
-            --debugmode ${debugmode} \
-            --verbose ${verbose} \
             --recog-json ${feat_recog_dir}/split${nj}utt/data.JOB.json \
             --result-label ${expdir}/${decode_dir}/data.JOB.json \
             --model ${expdir}/results/${recog_model}  \
@@ -272,11 +333,11 @@ if [ ${stage} -le 5 ]; then
             --maxlenratio ${maxlenratio} \
             --minlenratio ${minlenratio} \
             --ctc-weight ${ctc_weight} \
-            --rnnlm ${lmexpdir}/rnnlm.model.best \
-            --lm-weight ${lm_weight} &
+            --lm-weight ${lm_weight} \
+            $recog_opts &
         wait
 
-        score_sclite.sh --wer true ${expdir}/${decode_dir} ${dict}
+        score_sclite.sh --wer true --nlsyms ${nlsyms} ${expdir}/${decode_dir} ${dict}
 
     ) &
     done

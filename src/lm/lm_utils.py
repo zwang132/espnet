@@ -60,10 +60,19 @@ def count_tokens(data, unk_id=None):
 
 def compute_perplexity(result):
     # Routine to rewrite the result dictionary of LogReport to add perplexity values
-    result['perplexity'] = np.exp(result['main/loss'] / result['main/count'])
+    if 'error/loss' in result:
+        result['perplexity'] = np.exp(result['error/loss'] / result['error/count'])
+    else:
+        result['perplexity'] = np.exp(result['main/loss'] / result['main/count'])
     if 'validation/main/loss' in result:
         result['val_perplexity'] = np.exp(result['validation/main/loss'])
 
+def negate_gradient(parameters, error_weight):
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    parameters = list(filter(lambda p: p.grad is not None, paramters))
+    for p in parameters:
+        p.grad.data.mul_(error_weight)
 
 class ParallelSentenceIterator(chainer.dataset.Iterator):
     """Dataset iterator to create a batch of sentences.
@@ -74,7 +83,7 @@ class ParallelSentenceIterator(chainer.dataset.Iterator):
        randomly shuffled.
     """
 
-    def __init__(self, dataset, batch_size, max_length=0, sos=0, eos=0, repeat=True):
+    def __init__(self, dataset, batch_size, max_length=0, sos=0, eos=0, repeat=True, Order=None):
         self.dataset = dataset
         self.batch_size = batch_size  # batch size
         # Number of completed sweeps over the dataset. In this case, it is
@@ -100,7 +109,10 @@ class ParallelSentenceIterator(chainer.dataset.Iterator):
                 self.batch_indices.append(np.array(indices[bs:be]))
                 bs = be
             # shuffle batches
-            random.shuffle(self.batch_indices)
+            if Order is not None:
+                random.Random(Order).shuffle(self.batch_indices)
+            else:
+                random.shuffle(self.batch_indices)
         else:
             self.batch_indices = [np.array([i]) for i in six.moves.range(length)]
 

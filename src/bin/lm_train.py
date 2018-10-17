@@ -46,10 +46,17 @@ def main():
                         help='Filename of validation label data')
     parser.add_argument('--test-label', type=str,
                         help='Filename of test label data')
+    parser.add_argument('--error-label', default='', type=str,
+                        help='Filename of error label data')
     # LSTMLM training configuration
     parser.add_argument('--opt', default='sgd', type=str,
                         choices=['sgd', 'adam'],
                         help='Optimizer')
+    parser.add_argument('--error-opt', default='sgd', type=str,
+                        choices=['sgd', 'adam'],
+                        help='Optimizer for error set')
+    parser.add_argument('--error-lr', default=0.1, type=float,
+                        help='Learning rate for error optimizer(SGD)')
     parser.add_argument('--batchsize', '-b', type=int, default=300,
                         help='Number of examples in each mini-batch')
     parser.add_argument('--epoch', '-e', type=int, default=20,
@@ -62,6 +69,8 @@ def main():
                         help='Number of hidden units')
     parser.add_argument('--maxlen', type=int, default=40,
                         help='Batch size is reduced if the input sequence > ML')
+    parser.add_argument('--error-weight', type=float, default=-0.1,
+                        help='Weight of loss from error sentences')
     args = parser.parse_args()
 
     # logging info

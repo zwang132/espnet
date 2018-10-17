@@ -99,7 +99,7 @@ set -o pipefail
 train_set=train_si284
 train_dev=test_dev93
 train_test=test_eval92
-recog_set="test_dev93 test_eval92"
+recog_set="test_dev93 test_eval92 train_si284"
 
 if [ ${stage} -le 0 ]; then
     ### Task dependent. You have to make data the following preparation part by yourself.
@@ -297,7 +297,7 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs}
 fi
-echo "Stage 4" && exit 1
+
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32
