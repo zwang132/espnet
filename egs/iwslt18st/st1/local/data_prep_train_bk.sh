@@ -3,14 +3,23 @@
 # Copyright 2018 Kyoto University (Hirofumi Inaguma)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
+export LC_ALL=C
+
+lc=
+remove_punctuation=
+
+. utils/parse_options.sh || exit 1;
+
 if [ "$#" -ne 1 ]; then
   echo "Usage: $0 <src-dir>"
   echo "e.g.: $0 /export/corpora4/IWSLT/iwslt-corpus"
-  exit 1
+  exit 1;
 fi
 
 src=$1/train/iwslt-corpus
 dst=data/local/train
+
+[ ! -d $src ] && echo "$0: no such directory $src" && exit 1;
 
 wav_dir=$src/wav
 trans_dir=$src/parallel
@@ -18,7 +27,7 @@ yml=$trans_dir/train.yaml
 en=$trans_dir/train.en
 de=$trans_dir/train.de
 
-mkdir -p $dst
+mkdir -p $dst || exit 1;
 
 [ ! -d $wav_dir ] && echo "$0: no such directory $wav_dir" && exit 1;
 [ ! -d $trans_dir ] && echo "$0: no such directory $trans_dir" && exit 1;
@@ -33,6 +42,7 @@ utt2spk=$dst/utt2spk; [[ -f "$utt2spk" ]] && rm $utt2spk
 spk2utt=$dst/spk2utt; [[ -f "$spk2utt" ]] && rm $spk2utt
 segments=$dst/segments; [[ -f "$segments" ]] && rm $segments
 
+# error check
 n=`cat $yml | grep duration | wc -l`
 n_en=`cat $en | wc -l`
 n_de=`cat $de | wc -l`
@@ -58,28 +68,43 @@ awk '{
     endt=offset+duration+extendt;
     printf("ted_%04d_%07.0f_%07.0f\n", spkid, int(1000*startt+0.5), int(1000*endt+0.5));
 }' $dst/.yaml1 > $dst/.yaml2
-cat $en > $dst/.en0
-cat $de > $dst/.de0
 # NOTE: Extend the lengths of short utterances (< 0.2s) rather than exclude them
 
-# normalize punctuation & tokenize
-normalize-punctuation.perl -l en < $dst/.en0 | \
-  tokenizer.perl -a -l en > $dst/.en1
-normalize-punctuation.perl -l de < $dst/.de0 | \
-  tokenizer.perl -a -l de > $dst/.de1
+cat $en > $dst/.en.org
+cat $de > $dst/.de.org
+
+for lang in en de; do
+  # normalize punctuation
+  normalize-punctuation.perl -l ${lang} < $dst/.${lang}.org > $dst/.${lang}.norm
+  # lowercasing
+  if [ ! -z ${lc} ]; then
+    lowercase.perl < $dst/.${lang}.norm > $dst/.${lang}.norm.lc
+  else
+    cp $dst/.${lang}.norm $dst/.${lang}.norm.lc
+  fi
+
+  # remove punctuation
+  if [ ! -z ${remove_punctuation} ]; then
+    local/remove_punctuation.pl < $dst/.${lang}.norm.lc > $dst/.${lang}.norm.lc.rm
+  else
+    cp $dst/.${lang}.norm.lc $dst/.${lang}.norm.lc.rm
+  fi
+
+  # tokenization
+  tokenizer.perl -a -l ${lang} < $dst/.${lang}.norm.lc.rm > $dst/.${lang}.norm.lc.rm.tok
+done
+
 
 # error check
 n=`cat $dst/.yaml2 | wc -l`
-n_en=`cat $dst/.en1 | wc -l`
-n_de=`cat $dst/.de1 | wc -l`
+n_en=`cat $dst/.en.norm.lc.rm.tok | wc -l`
+n_de=`cat $dst/.de.norm.lc.rm.tok | wc -l`
 [ $n -ne $n_en ] && echo "Warning: expected $n data data files, found $n_en" && exit 1;
 [ $n -ne $n_de ] && echo "Warning: expected $n data data files, found $n_de" && exit 1;
 
-paste --delimiters " " $dst/.yaml2 $dst/.en1 | sort > $dst/text.en
-paste --delimiters " " $dst/.yaml2 $dst/.de1 | awk '{
-  if (length($0) > 25) print $0 }' | sort > $dst/text.de
+paste --delimiters " " $dst/.yaml2 $dst/.en.norm.lc.rm.tok | sort > $dst/text.en
+paste --delimiters " " $dst/.yaml2 $dst/.de.norm.lc.rm.tok | awk '{if (length($0) > 25) print $0}' | sort > $dst/text.de
 # **NOTE: empty utterances are includes in original German transcripts
-# **NOTE: case-sensitive
 
 
 # (1c) Make segments files from transcript
@@ -105,13 +130,13 @@ awk '{
 sort $dst/utt2spk | utils/utt2spk_to_spk2utt.pl | sort > $dst/spk2utt
 
 
-# Match the number of utterances between EN and DE (reduce EN utterances)
+# Match the number of utterances between En and De (reduce En utterances)
 oldnum=`wc -l $dst/text.en | awk '{print $1}'`
-utils/filter_scp.pl $dst/utt2spk < $dst/text.en > $dst/text_en_tmp
-newnum=`wc -l $dst/text_en_tmp | awk '{print $1}'`
+utils/filter_scp.pl $dst/utt2spk < $dst/text.en > $dst/text.en.tmp
+newnum=`wc -l $dst/text.en.tmp | awk '{print $1}'`
 echo "change from $oldnum to $newnum"
 rm $dst/text.en
-mv $dst/text_en_tmp $dst/text.en
+mv $dst/text.en.tmp $dst/text.en
 
 # error check
 n_en=`cat $dst/text.en | wc -l`
@@ -120,16 +145,12 @@ n_de=`cat $dst/text.de | wc -l`
 
 
 # Copy stuff intoc its final locations [this has been moved from the format_data script]
-mkdir -p data/train_org.en
+mkdir -p data/train
 for f in spk2utt utt2spk wav.scp segments; do
-  cp $dst/$f data/train_org.en/
+  cp $dst/$f data/train/$f
 done
-cp $dst/text.en data/train_org.en/text
+cp $dst/text.de data/train/text.de
+cp $dst/text.en data/train/text.en
 
-mkdir -p data/train_org.de
-for f in spk2utt utt2spk wav.scp segments; do
-  cp $dst/$f data/train_org.de/
-done
-cp $dst/text.de data/train_org.de/text
 
 echo "$0: successfully prepared data in $dst"

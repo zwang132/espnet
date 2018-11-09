@@ -3,16 +3,22 @@
 # Copyright 2018 Kyoto University (Hirofumi Inaguma)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
+lc=
+remove_punctuation=
+
+. utils/parse_options.sh || exit 1;
+
 if [ "$#" -ne 2 ]; then
   echo "Usage: $0 <src-dir> <set>"
   echo "e.g.: $0 /export/corpora4/IWSLT dev2010"
-  exit 1
+  exit 1;
 fi
-
 
 set=$2
 src=$1/$set/IWSLT.$set
 dst=data/local/$set
+
+[ ! -d $src ] && echo "$0: no such directory $src" && exit 1;
 
 wav_dir=$src/wavs
 xml_en=$src/IWSLT.TED.$set.en-de.en.xml
@@ -23,7 +29,7 @@ else
   yml=$src/test-db.yaml
 fi
 
-mkdir -p $dst
+mkdir -p $dst || exit 1;
 
 [ ! -d $wav_dir ] && echo "$0: no such directory $wav_dir" && exit 1;
 if [ $set != tst2018 ]; then
@@ -61,18 +67,45 @@ fi
 # (1a) Transcriptions preparation
 if [ $set != tst2018 ]; then
   # make basic transcription file (add segments info)
-  python local/parse_xml.py $xml_en | sort > $dst/.en0
-  python local/parse_xml.py $xml_de | sort > $dst/.de0
+  python local/parse_xml.py $xml_en | sort > $dst/.en.org
+  python local/parse_xml.py $xml_de | sort > $dst/.de.org
 
   # normalize punctuation
-  paste -d " " <(awk '{print $1}' $dst/.en0) <(cut -f 2- -d " " $dst/.en0 | normalize-punctuation.perl -l en | tokenizer.perl -a -l en) > $dst/test.en
-  paste -d " " <(awk '{print $1}' $dst/.de0) <(cut -f 2- -d " " $dst/.de0 | normalize-punctuation.perl -l de | tokenizer.perl -a -l de) > $dst/test.de
-  # NOTE: case-sensitive
+  cut -f 2- -d " " $dst/.en.org | normalize-punctuation.perl -l en > $dst/.en.norm
+  cut -f 2- -d " " $dst/.de.org | normalize-punctuation.perl -l de > $dst/.de.norm
+
+  # lowercasing
+  if [ ! -z ${lc} ]; then
+    echo "lowercasing..."
+    lowercase.perl < $dst/.en.norm > $dst/.en.norm.lc
+    lowercase.perl < $dst/.de.norm > $dst/.de.norm.lc
+  else
+    cp $dst/.en.norm $dst/.en.norm.lc
+    cp $dst/.de.norm $dst/.de.norm.lc
+  fi
+
+  # remove punctuation
+  if [ ! -z ${remove_punctuation} ]; then
+    echo "remove punctuation..."
+    local/remove_punctuation.pl < $dst/.en.norm.lc > $dst/.en.norm.lc.rm
+    local/remove_punctuation.pl < $dst/.de.norm.lc > $dst/.de.norm.lc.rm
+  else
+    cp $dst/.en.norm.lc $dst/.en.norm.lc.rm
+    cp $dst/.de.norm.lc $dst/.de.norm.lc.rm
+  fi
+
+  # tokenization
+  echo "tokenization..."
+  tokenizer.perl -a -l en < $dst/.en.norm.lc.rm > $dst/.en.norm.lc.rm.tok
+  tokenizer.perl -a -l de < $dst/.de.norm.lc.rm > $dst/.de.norm.lc.rm.tok
 
   # error check
-  n_en=`cat $dst/test.en | wc -l`
-  n_de=`cat $dst/test.de | wc -l`
+  n_en=`cat $dst/.en.norm.lc.rm.tok | wc -l`
+  n_de=`cat $dst/.de.norm.lc.rm.tok | wc -l`
   [ $n_en -ne $n_de ] && echo "Warning: expected $n_en data data files, found $n_de" && exit 1;
+
+  paste -d " " <(awk '{print $1}' $dst/.en.org) <(cat $dst/.en.norm.lc.rm.tok) > $dst/text.en
+  paste -d " " <(awk '{print $1}' $dst/.de.org) <(cat $dst/.de.norm.lc.rm.tok) > $dst/text.de
 fi
 
 
@@ -127,22 +160,15 @@ sort $dst/utt2spk | utils/utt2spk_to_spk2utt.pl | sort > $dst/spk2utt
 
 
 # Copy stuff intoc its final locations [this has been moved from the format_data script]
-mkdir -p data/${set}.en
+mkdir -p data/${set}
 for f in spk2utt utt2spk wav.scp segments; do
-  cp $dst/$f data/${set}.en/
+  cp $dst/$f data/${set}/
 done
 if [ $set != tst2018 ]; then
-  cp $dst/test.en data/${set}.en/text_noseg
+  cp $dst/text.de data/${set}/text_noseg.de
+  cp $dst/text.en data/${set}/text_noseg.en
   # NOTE: for passing utils/validate_data_dir.sh
 fi
 
-mkdir -p data/${set}.de
-for f in spk2utt utt2spk wav.scp segments; do
-  cp $dst/$f data/${set}.de/
-done
-if [ $set != tst2018 ]; then
-  cp $dst/test.de data/${set}.de/text_noseg
-  # NOTE: for passing utils/validate_data_dir.sh
-fi
 
 echo "$0: successfully prepared data in $dst"
