@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import six
+import sys
 
 # chainer related
 import chainer
@@ -33,6 +34,7 @@ from asr_utils import chainer_load
 from asr_utils import CompareValueTrigger
 from asr_utils import get_model_conf
 from asr_utils import load_inputs_and_targets
+from asr_utils import load_labeldict
 from asr_utils import make_batchset
 from asr_utils import PlotAttentionReport
 from asr_utils import restore_snapshot
@@ -295,14 +297,9 @@ def train(args):
                               args.maxlen_in, args.maxlen_out, args.minibatches)
         # hack to make batchsize argument as 1
         # actual batchsize is included in a list
-        if args.n_iter_processes > 0:
-            train_iter = chainer.iterators.MultiprocessIterator(
-                TransformDataset(train, converter.transform),
-                batch_size=1, n_processes=args.n_iter_processes, n_prefetch=8, maxtasksperchild=20)
-        else:
-            train_iter = chainer.iterators.SerialIterator(
-                TransformDataset(train, converter.transform),
-                batch_size=1)
+        train_iter = chainer.iterators.MultiprocessIterator(
+            TransformDataset(train, converter.transform), 1,
+            n_processes=2, n_prefetch=8, maxtasksperchild=20)
 
         # set up updater
         updater = CustomUpdater(
@@ -327,16 +324,10 @@ def train(args):
 
         # hack to make batchsize argument as 1
         # actual batchsize is included in a list
-        if args.n_iter_processes > 0:
-            train_iters = [chainer.iterators.MultiprocessIterator(
-                TransformDataset(train_subsets[gid], converter.transform),
-                batch_size=1, n_processes=args.n_iter_processes, n_prefetch=8, maxtasksperchild=20)
-                for gid in six.moves.xrange(ngpu)]
-        else:
-            train_iters = [chainer.iterators.SerialIterator(
-                TransformDataset(train_subsets[gid], converter.transform),
-                batch_size=1)
-                for gid in six.moves.xrange(ngpu)]
+        train_iters = [chainer.iterators.MultiprocessIterator(
+            TransformDataset(train_subsets[gid], converter.transform),
+            1, n_processes=2 * ngpu, n_prefetch=8, maxtasksperchild=20)
+            for gid in six.moves.xrange(ngpu)]
 
         # set up updater
         updater = CustomParallelUpdater(
@@ -353,16 +344,9 @@ def train(args):
     # set up validation iterator
     valid = make_batchset(valid_json, args.batch_size,
                           args.maxlen_in, args.maxlen_out, args.minibatches)
-    if args.n_iter_processes > 0:
-        valid_iter = chainer.iterators.MultiprocessIterator(
-            TransformDataset(valid, converter.transform),
-            batch_size=1, repeat=False, shuffle=False,
-            n_processes=args.n_iter_processes, n_prefetch=8, maxtasksperchild=20)
-    else:
-        valid_iter = chainer.iterators.SerialIterator(
-            TransformDataset(valid, converter.transform),
-            batch_size=1, repeat=False, shuffle=False)
-
+    valid_iter = chainer.iterators.MultiprocessIterator(
+        TransformDataset(valid, converter.transform),
+        1, n_processes=2, n_prefetch=8, repeat=False, shuffle=False, maxtasksperchild=20)
     # Evaluate the model with the test dataset for each epoch
     trainer.extend(extensions.Evaluator(
         valid_iter, model, converter=converter, device=gpu_id))
@@ -461,18 +445,20 @@ def recog(args):
     # read rnnlm
     if args.rnnlm:
         rnnlm_args = get_model_conf(args.rnnlm, args.rnnlm_conf)
-        rnnlm = lm_chainer.ClassifierWithState(lm_chainer.RNNLM(
-            len(train_args.char_list), rnnlm_args.layer, rnnlm_args.unit))
+        rnnlm = lm_chainer.ClassifierWithState(lm_chainer.RNNLM(len(train_args.char_list), rnnlm_args.unit))
         chainer_load(args.rnnlm, rnnlm)
     else:
         rnnlm = None
 
     if args.word_rnnlm:
-        rnnlm_args = get_model_conf(args.word_rnnlm, args.word_rnnlm_conf)
-        word_dict = rnnlm_args.char_list_dict
+        if not args.word_dict:
+            logging.error('word dictionary file is not specified for the word RNNLM.')
+            sys.exit(1)
+
+        rnnlm_args = get_model_conf(args.word_rnnlm, args.rnnlm_conf)
+        word_dict = load_labeldict(args.word_dict)
         char_dict = {x: i for i, x in enumerate(train_args.char_list)}
-        word_rnnlm = lm_chainer.ClassifierWithState(lm_chainer.RNNLM(
-            len(word_dict), rnnlm_args.layer, rnnlm_args.unit))
+        word_rnnlm = lm_chainer.ClassifierWithState(lm_chainer.RNNLM(len(word_dict), rnnlm_args.unit))
         chainer_load(args.word_rnnlm, word_rnnlm)
 
         if rnnlm is not None:

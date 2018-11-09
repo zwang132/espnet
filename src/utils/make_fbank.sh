@@ -3,6 +3,7 @@
 # Copyright 2018 Nagoya University (Tomoki Hayashi)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
+# TODO accept --write_utt2num_frames option
 # Begin configuration section.
 nj=4
 fs=22050
@@ -12,7 +13,6 @@ n_mels=80
 n_fft=1024
 n_shift=512
 win_length=
-write_utt2num_frames=true
 cmd=run.pl
 # End configuration section.
 
@@ -77,21 +77,13 @@ $cmd JOB=1:$nj $logdir/make_fbank_${name}.JOB.log \
         --n_shift $n_shift \
         --win_length $win_length \
         --n_mels $n_mels \
-        --write_utt2num_frames ${write_utt2num_frames} \
         $logdir/wav.JOB.scp \
         $fbankdir/raw_fbank_$name.JOB
 
 # concatenate the .scp files together.
 for n in $(seq $nj); do
     cat $fbankdir/raw_fbank_$name.$n.scp || exit 1;
-done > $data/feats.scp || exit 1
-
-if $write_utt2num_frames; then
-    for n in $(seq $nj); do
-        cat $fbankdir/utt2num_frames.$n || exit 1;
-    done > $data/utt2num_frames || exit 1
-    rm $fbankdir/utt2num_frames.* 2>/dev/null
-fi
+done > $data/feats.scp
 
 rm $logdir/wav.*.scp 2>/dev/null
 

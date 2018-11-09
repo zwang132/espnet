@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import sys
 
 # chainer related
 import chainer
@@ -27,6 +28,7 @@ from asr_utils import add_results_to_json
 from asr_utils import CompareValueTrigger
 from asr_utils import get_model_conf
 from asr_utils import load_inputs_and_targets
+from asr_utils import load_labeldict
 from asr_utils import make_batchset
 from asr_utils import PlotAttentionReport
 from asr_utils import restore_snapshot
@@ -62,7 +64,7 @@ class CustomEvaluator(extensions.Evaluator):
         self.converter = converter
         self.device = device
 
-    # The core part of the update routine can be customized by overriding
+    # The core part of the update routine can be customized by overriding.
     def evaluate(self):
         iterator = self._iterators['main']
 
@@ -117,12 +119,13 @@ class CustomUpdater(training.StandardUpdater):
         x = self.converter(batch, self.device)
 
         # Compute the loss at this time step and accumulate it
+        loss = self.model(*x)
+        if self.ngpu > 1:
+            loss *= 1. / self.ngpu
         optimizer.zero_grad()  # Clear the parameter gradients
         if self.ngpu > 1:
-            loss = 1. / self.ngpu * self.model(*x)
             loss.backward(loss.new_ones(self.ngpu))  # Backprop
         else:
-            loss = self.model(*x)
             loss.backward()  # Backprop
         loss.detach()  # Truncate the graph
         # compute the gradient norm to check if it is normal or not
@@ -133,6 +136,16 @@ class CustomUpdater(training.StandardUpdater):
             logging.warning('grad norm is nan. Do not update model.')
         else:
             optimizer.step()
+
+        # early stopping
+        # for chainer
+        if hasattr(optimizer, 'eps'):
+            current_eps = optimizer.eps
+        # pytorch
+        else:
+            current_eps = optimizer.param_groups[0]["eps"]
+        if current_eps < 1e-16:
+            raise ValueError("early stopping: epsilon %s" % str(current_eps))
 
 
 class CustomConverter(object):
@@ -212,14 +225,6 @@ def train(args):
     e2e = E2E(idim, odim, args)
     model = Loss(e2e, args.mtlalpha)
 
-    if args.rnnlm is not None:
-        rnnlm_args = get_model_conf(args.rnnlm, args.rnnlm_conf)
-        rnnlm = lm_pytorch.ClassifierWithState(
-            lm_pytorch.RNNLM(
-                len(args.char_list), rnnlm_args.layer, rnnlm_args.unit))
-        torch.load(args.rnnlm, rnnlm)
-        e2e.rnnlm = rnnlm
-
     # write model config
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
@@ -248,7 +253,8 @@ def train(args):
         optimizer = torch.optim.Adadelta(
             model.parameters(), rho=0.95, eps=args.eps)
     elif args.opt == 'adam':
-        optimizer = torch.optim.Adam(model.parameters())
+        optimizer = torch.optim.Adam(
+            model.parameters())
 
     # FIXME: TOO DIRTY HACK
     setattr(optimizer, "target", reporter)
@@ -270,21 +276,13 @@ def train(args):
                           args.maxlen_in, args.maxlen_out, args.minibatches)
     # hack to make batchsze argument as 1
     # actual bathsize is included in a list
-    if args.n_iter_processes > 0:
-        train_iter = chainer.iterators.MultiprocessIterator(
-            TransformDataset(train, converter.transform),
-            batch_size=1, n_processes=args.n_iter_processes, n_prefetch=8, maxtasksperchild=20)
-        valid_iter = chainer.iterators.MultiprocessIterator(
-            TransformDataset(valid, converter.transform),
-            batch_size=1, repeat=False, shuffle=False,
-            n_processes=args.n_iter_processes, n_prefetch=8, maxtasksperchild=20)
-    else:
-        train_iter = chainer.iterators.SerialIterator(
-            TransformDataset(train, converter.transform),
-            batch_size=1)
-        valid_iter = chainer.iterators.SerialIterator(
-            TransformDataset(valid, converter.transform),
-            batch_size=1, repeat=False, shuffle=False)
+    train_iter = chainer.iterators.MultiprocessIterator(
+        TransformDataset(train, converter.transform),
+        batch_size=1, n_processes=1, n_prefetch=8)
+    # maxtasksperchild=20
+    valid_iter = chainer.iterators.SerialIterator(
+        TransformDataset(valid, converter.transform),
+        batch_size=1, repeat=False, shuffle=False)
 
     # Set up a trainer
     updater = CustomUpdater(
@@ -302,8 +300,9 @@ def train(args):
 
     # Save attention weight each epoch
     if args.num_save_attention > 0 and args.mtlalpha != 1.0:
+        # sort it by input lengths
         data = sorted(list(valid_json.items())[:args.num_save_attention],
-                      key=lambda x: int(x[1]['input'][0]['shape'][1]), reverse=True)
+                      key=lambda x: int(x[1]['input'][0]['shape'][0]), reverse=True)
         if hasattr(model, "module"):
             att_vis_fn = model.module.predictor.calculate_all_attentions
         else:
@@ -361,10 +360,6 @@ def train(args):
             'eps', lambda trainer: trainer.updater.get_optimizer('main').param_groups[0]["eps"]),
             trigger=(REPORT_INTERVAL, 'iteration'))
         report_keys.append('eps')
-    if args.report_cer:
-        report_keys.append('validation/main/cer')
-    if args.report_wer:
-        report_keys.append('validation/main/wer')
     trainer.extend(extensions.PrintReport(
         report_keys), trigger=(REPORT_INTERVAL, 'iteration'))
 
@@ -387,25 +382,26 @@ def recog(args):
     e2e = E2E(idim, odim, train_args)
     model = Loss(e2e, train_args.mtlalpha)
     torch_load(args.model, model)
-    e2e.recog_args = args
 
     # read rnnlm
     if args.rnnlm:
         rnnlm_args = get_model_conf(args.rnnlm, args.rnnlm_conf)
         rnnlm = lm_pytorch.ClassifierWithState(
-            lm_pytorch.RNNLM(
-                len(train_args.char_list), rnnlm_args.layer, rnnlm_args.unit))
+            lm_pytorch.RNNLM(len(train_args.char_list), rnnlm_args.unit))
         torch_load(args.rnnlm, rnnlm)
         rnnlm.eval()
     else:
         rnnlm = None
 
     if args.word_rnnlm:
-        rnnlm_args = get_model_conf(args.word_rnnlm, args.word_rnnlm_conf)
-        word_dict = rnnlm_args.char_list_dict
+        if not args.word_dict:
+            logging.error('word dictionary file is not specified for the word RNNLM.')
+            sys.exit(1)
+
+        rnnlm_args = get_model_conf(args.word_rnnlm, args.rnnlm_conf)
+        word_dict = load_labeldict(args.word_dict)
         char_dict = {x: i for i, x in enumerate(train_args.char_list)}
-        word_rnnlm = lm_pytorch.ClassifierWithState(lm_pytorch.RNNLM(
-            len(word_dict), rnnlm_args.layer, rnnlm_args.unit))
+        word_rnnlm = lm_pytorch.ClassifierWithState(lm_pytorch.RNNLM(len(word_dict), rnnlm_args.unit))
         torch_load(args.word_rnnlm, word_rnnlm)
         word_rnnlm.eval()
 
@@ -418,51 +414,18 @@ def recog(args):
                 extlm_pytorch.LookAheadWordLM(word_rnnlm.predictor,
                                               word_dict, char_dict))
 
-    # gpu
-    if args.ngpu == 1:
-        gpu_id = range(args.ngpu)
-        logging.info('gpu id: ' + str(gpu_id))
-        model.cuda()
-        if rnnlm:
-            rnnlm.cuda()
-
     # read json data
     with open(args.recog_json, 'rb') as f:
         js = json.load(f)['utts']
+
+    # decode each utterance
     new_js = {}
-
-    if args.batchsize is None:
-        with torch.no_grad():
-            for idx, name in enumerate(js.keys(), 1):
-                logging.info('(%d/%d) decoding ' + name, idx, len(js.keys()))
-                feat = kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
-                nbest_hyps = e2e.recognize(feat, args, train_args.char_list, rnnlm)
-                new_js[name] = add_results_to_json(js[name], nbest_hyps, train_args.char_list)
-    else:
-        try:
-            from itertools import zip_longest as zip_longest
-        except Exception:
-            from itertools import izip_longest as zip_longest
-
-        def grouper(n, iterable, fillvalue=None):
-            kargs = [iter(iterable)] * n
-            return zip_longest(*kargs, fillvalue=fillvalue)
-
-        # sort data
-        keys = js.keys()
-        feat_lens = [js[key]['input'][0]['shape'][0] for key in keys]
-        sorted_index = sorted(range(len(feat_lens)), key=lambda i: -feat_lens[i])
-        keys = [keys[i] for i in sorted_index]
-
-        with torch.no_grad():
-            for names in grouper(args.batchsize, keys, None):
-                names = [name for name in names if name]
-                feats = [kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
-                         for name in names]
-                nbest_hyps = e2e.recognize_batch(feats, args, train_args.char_list, rnnlm=rnnlm)
-                for i, nbest_hyp in enumerate(nbest_hyps):
-                    name = names[i]
-                    new_js[name] = add_results_to_json(js[name], nbest_hyp, train_args.char_list)
+    with torch.no_grad():
+        for idx, name in enumerate(js.keys(), 1):
+            logging.info('(%d/%d) decoding ' + name, idx, len(js.keys()))
+            feat = kaldi_io_py.read_mat(js[name]['input'][0]['feat'])
+            nbest_hyps = e2e.recognize(feat, args, train_args.char_list, rnnlm)
+            new_js[name] = add_results_to_json(js[name], nbest_hyps, train_args.char_list)
 
     # TODO(watanabe) fix character coding problems when saving it
     with open(args.result_label, 'wb') as f:

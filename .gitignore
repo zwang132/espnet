@@ -35,5 +35,8 @@ tools/chainer_ctc*
 tools/warp-ctc*
 tools/sentencepiece/*
 tools/moses
+tools/*mwerSegmenter
+tools/subword-nmt
+tools/lium_spkdiarization-8.4.1.jar
 
 .pytest_cache

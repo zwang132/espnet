@@ -11,8 +11,7 @@ fmin=
 n_fft=1024
 n_shift=512
 win_length=
-n_mels=
-iters=1000
+n_mels=80
 cmd=run.pl
 # End configuration section.
 
@@ -62,11 +61,10 @@ $cmd JOB=1:$nj $logdir/griffin_lim_${name}.JOB.log \
         --fs $fs \
         --fmax $fmax \
         --fmin $fmin \
-        --win_length $win_length \
         --n_fft $n_fft \
         --n_shift $n_shift \
+        --win_length $win_length \
         --n_mels $n_mels \
-        --iters $iters \
         $logdir/feats.JOB.scp \
         $wavdir
 

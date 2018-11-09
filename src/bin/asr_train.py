@@ -97,35 +97,6 @@ def main():
                         help='Label smoothing weight')
     parser.add_argument('--sampling-probability', default=0.0, type=float,
                         help='Ratio of predicted labels fed back to decoder')
-    # recognition options to compute CER/WER
-    parser.add_argument('--report-cer', default=False, action='store_true',
-                        help='Compute CER on development set')
-    parser.add_argument('--report-wer', default=False, action='store_true',
-                        help='Compute WER on development set')
-    parser.add_argument('--nbest', type=int, default=1,
-                        help='Output N-best hypotheses')
-    parser.add_argument('--beam-size', type=int, default=4,
-                        help='Beam size')
-    parser.add_argument('--penalty', default=0.0, type=float,
-                        help='Incertion penalty')
-    parser.add_argument('--maxlenratio', default=0.0, type=float,
-                        help="""Input length ratio to obtain max output length.
-                        If maxlenratio=0.0 (default), it uses a end-detect function
-                        to automatically find maximum hypothesis lengths""")
-    parser.add_argument('--minlenratio', default=0.0, type=float,
-                        help='Input length ratio to obtain min output length')
-    parser.add_argument('--ctc-weight', default=0.3, type=float,
-                        help='CTC weight in joint decoding')
-    parser.add_argument('--rnnlm', type=str, default=None,
-                        help='RNNLM model file to read')
-    parser.add_argument('--rnnlm-conf', type=str, default=None,
-                        help='RNNLM model config file to read')
-    parser.add_argument('--lm-weight', default=0.1, type=float,
-                        help='RNNLM weight.')
-    parser.add_argument('--sym-space', default='<space>', type=str,
-                        help='Space symbol')
-    parser.add_argument('--sym-blank', default='<blank>', type=str,
-                        help='Blank symbol')
     # model (parameter) related
     parser.add_argument('--dropout-rate', default=0.0, type=float,
                         help='Dropout rate')
@@ -136,8 +107,6 @@ def main():
                         help='Batch size is reduced if the input sequence length > ML')
     parser.add_argument('--maxlen-out', default=150, type=int, metavar='ML',
                         help='Batch size is reduced if the output sequence length > ML')
-    parser.add_argument('--n_iter_processes', default=0, type=int,
-                        help='Number of processes of iterator')
     # optimization related
     parser.add_argument('--opt', default='adadelta', type=str,
                         choices=['adadelta', 'adam'],
@@ -157,6 +126,16 @@ def main():
                         help='Gradient norm threshold to clip')
     parser.add_argument('--num-save-attention', default=3, type=int,
                         help='Number of samples of attention to be saved')
+    # cold fusion related
+    parser.add_argument('--lm-unit', default=650, type=int,
+                        help='Number of LSTM units in each layer')
+    parser.add_argument('--lm-layer', default=2, type=int,
+                        help='Number of layers')
+    parser.add_argument('--cold-fusion', default='', type=str, nargs='?',
+                        choices=['hidden', 'prob', ''],
+                        help='RNNLM features used for cold fusion')
+    parser.add_argument('--rnnlm-cf', default=None, type=str, nargs='?',
+                        help='RNNLM model file for cold fusion')
     args = parser.parse_args()
 
     # logging info
@@ -182,6 +161,7 @@ def main():
                 cvd = subprocess.check_output(["/usr/local/bin/free-gpu", "-n", str(args.ngpu)]).decode().strip()
                 logging.info('CLSP: use gpu' + cvd)
                 os.environ['CUDA_VISIBLE_DEVICES'] = cvd
+
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
         if cvd is None:
             logging.warn("CUDA_VISIBLE_DEVICES is not set.")

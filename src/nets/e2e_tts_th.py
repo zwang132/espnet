@@ -3,7 +3,6 @@
 # Copyright 2018 Nagoya University (Tomoki Hayashi)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
-
 from __future__ import division
 
 import logging
@@ -17,8 +16,6 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 from torch.nn.utils.rnn import pad_packed_sequence
 
-from e2e_asr_th import AttForward
-from e2e_asr_th import AttForwardTA
 from e2e_asr_th import AttLoc
 from e2e_asr_th import to_cuda
 
@@ -33,31 +30,35 @@ def decoder_init(m):
         torch.nn.init.xavier_uniform_(m.weight, torch.nn.init.calculate_gain('tanh'))
 
 
-def make_non_pad_mask(lengths):
-    """FUNCTION TO MAKE MASK TENSOR CONTAINING INDICES OF NON-PADDED PART
+def make_mask(lengths, dim=None):
+    """FUNCTION TO MAKE BINARY MASK
 
-    e.g.: lengths = [5, 3, 2]
-          mask = [[1, 1, 1, 1 ,1],
-                  [1, 1, 1, 0, 0],
-                  [1, 1, 0, 0, 0]]
+    Args:
+        length (list): list of lengths
+        dim (int): # dimension
 
-    :param list lengths: list of lengths (B)
-    :return: mask tensor containing indices of non-padded part (B, Tmax)
-    :rtype: torch.Tensor
+    Return:
+        (torch.ByteTensor) binary mask tensor (B, Lmax, dim)
     """
-    bs = int(len(lengths))
+    batch = int(len(lengths))
     maxlen = int(max(lengths))
-    mask = torch.zeros(bs, maxlen, dtype=torch.uint8)
+    if dim is None:
+        mask = torch.zeros(batch, maxlen)
+    else:
+        dim = int(dim)
+        mask = torch.zeros(batch, maxlen, dim)
     for i, l in enumerate(lengths):
         mask[i, :l] = 1
 
-    return mask
+    return mask.byte()
 
 
 class Reporter(chainer.Chain):
-    def report(self, dicts):
-        for d in dicts:
-            chainer.reporter.report(d, self)
+    def report(self, l1_loss, mse_loss, bce_loss, loss):
+        chainer.reporter.report({'l1_loss': l1_loss}, self)
+        chainer.reporter.report({'mse_loss': mse_loss}, self)
+        chainer.reporter.report({'bce_loss': bce_loss}, self)
+        chainer.reporter.report({'loss': loss}, self)
 
 
 class ZoneOutCell(torch.nn.Module):
@@ -105,20 +106,14 @@ class Tacotron2Loss(torch.nn.Module):
     :param float bce_pos_weight: weight of positive sample of stop token (only for use_masking=True)
     """
 
-    def __init__(self, model, use_masking=True, bce_pos_weight=1.0):
+    def __init__(self, model, use_masking=True, bce_pos_weight=20.0):
         super(Tacotron2Loss, self).__init__()
         self.model = model
         self.use_masking = use_masking
         self.bce_pos_weight = bce_pos_weight
-        if hasattr(model, 'module'):
-            self.use_cbhg = model.module.use_cbhg
-            self.reduction_factor = model.module.reduction_factor
-        else:
-            self.use_cbhg = model.use_cbhg
-            self.reduction_factor = model.reduction_factor
         self.reporter = Reporter()
 
-    def forward(self, xs, ilens, ys, labels, olens, spembs=None, spcs=None):
+    def forward(self, xs, ilens, ys, labels, olens=None, spembs=None):
         """TACOTRON2 LOSS FORWARD CALCULATION
 
         :param torch.Tensor xs: batch of padded character ids (B, Tmax)
@@ -127,69 +122,41 @@ class Tacotron2Loss(torch.nn.Module):
         :param torch.Tensor labels: batch of the sequences of stop token labels (B, Lmax)
         :param list olens: batch of the lengths of each target (B)
         :param torch.Tensor spembs: batch of speaker embedding vector (B, spk_embed_dim)
-        :param torch.Tensor spcs: batch of padded target features (B, Lmax, spc_dim)
         :return: loss value
         :rtype: torch.Tensor
         """
-        # calcuate outputs
-        if self.use_cbhg:
-            cbhg_outs, after_outs, before_outs, logits = self.model(xs, ilens, ys, olens, spembs)
-        else:
-            after_outs, before_outs, logits = self.model(xs, ilens, ys, olens, spembs)
-
-        # remove mod part
-        if self.reduction_factor > 1:
-            olens = [olen - olen % self.reduction_factor for olen in olens]
-            ys = ys[:, :max(olens)]
-            labels = labels[:, :max(olens)]
-            spcs = spcs[:, :max(olens)] if spcs is not None else None
-
-        # prepare weight of positive samples in cross entorpy
-        if self.bce_pos_weight != 1.0:
-            weights = ys.new(*labels.size()).fill_(1)
-            weights.masked_fill_(labels.eq(1), self.bce_pos_weight)
-        else:
-            weights = None
-
-        # perform masking for padded values
-        if self.use_masking:
-            mask = to_cuda(self, make_non_pad_mask(olens).unsqueeze(-1))
+        after_outs, before_outs, logits = self.model(xs, ilens, ys, spembs)
+        if self.use_masking and olens is not None:
+            # weight positive samples
+            if self.bce_pos_weight != 1.0:
+                weights = ys.new(*labels.size()).fill_(1)
+                weights.masked_fill_(labels.eq(1), self.bce_pos_weight)
+            else:
+                weights = None
+            # masking padded values
+            mask = to_cuda(self, make_mask(olens, ys.size(2)))
             ys = ys.masked_select(mask)
             after_outs = after_outs.masked_select(mask)
             before_outs = before_outs.masked_select(mask)
             labels = labels.masked_select(mask[:, :, 0])
             logits = logits.masked_select(mask[:, :, 0])
             weights = weights.masked_select(mask[:, :, 0]) if weights is not None else None
-            if self.use_cbhg:
-                spcs = spcs.masked_select(mask)
-                cbhg_outs = cbhg_outs.masked_select(mask)
-
-        # calculate loss
-        l1_loss = F.l1_loss(after_outs, ys) + F.l1_loss(before_outs, ys)
-        mse_loss = F.mse_loss(after_outs, ys) + F.mse_loss(before_outs, ys)
-        bce_loss = F.binary_cross_entropy_with_logits(logits, labels, weights)
-        if self.use_cbhg:
-            # calculate chbg loss and then itegrate them
-            cbhg_l1_loss = F.l1_loss(cbhg_outs, spcs)
-            cbhg_mse_loss = F.mse_loss(cbhg_outs, spcs)
-            loss = l1_loss + mse_loss + bce_loss + cbhg_l1_loss + cbhg_mse_loss
-            # report loss values for logging
-            self.reporter.report([
-                {'l1_loss': l1_loss.item()},
-                {'mse_loss': mse_loss.item()},
-                {'bce_loss': bce_loss.item()},
-                {'cbhg_l1_loss': cbhg_l1_loss.item()},
-                {'cbhg_mse_loss': cbhg_mse_loss.item()},
-                {'loss': loss.item()}])
-        else:
-            # integrate loss
+            # calculate loss
+            l1_loss = F.l1_loss(after_outs, ys) + F.l1_loss(before_outs, ys)
+            mse_loss = F.mse_loss(after_outs, ys) + F.mse_loss(before_outs, ys)
+            bce_loss = F.binary_cross_entropy_with_logits(logits, labels, weights)
             loss = l1_loss + mse_loss + bce_loss
-            # report loss values for logging
-            self.reporter.report([
-                {'l1_loss': l1_loss.item()},
-                {'mse_loss': mse_loss.item()},
-                {'bce_loss': bce_loss.item()},
-                {'loss': loss.item()}])
+        else:
+            # calculate loss
+            l1_loss = F.l1_loss(after_outs, ys) + F.l1_loss(before_outs, ys)
+            mse_loss = F.mse_loss(after_outs, ys) + F.mse_loss(before_outs, ys)
+            bce_loss = F.binary_cross_entropy_with_logits(logits, labels)
+            loss = l1_loss + mse_loss + bce_loss
+
+        # report loss values for logging
+        logging.debug("loss = %.3e (bce: %.3e, l1: %.3e, mse: %.3e)" % (
+            loss.item(), bce_loss.item(), l1_loss.item(), mse_loss.item()))
+        self.reporter.report(l1_loss.item(), mse_loss.item(), bce_loss.item(), loss.item())
 
         return loss
 
@@ -223,15 +190,6 @@ class Tacotron2(torch.nn.Module):
         (bool) use_concate: whether to concatenate encoder embedding with decoder lstm outputs
         (float) dropout: dropout rate
         (float) zoneout: zoneout rate
-        (int) reduction_factor: reduction factor
-        (bool) use_cbhg: whether to use CBHG module
-        (int) cbhg_conv_bank_layers: the number of convoluional banks in CBHG
-        (int) cbhg_conv_bank_chans: the number of channels of convolutional bank in CBHG
-        (int) cbhg_proj_filts: the number of filter size of projection layeri in CBHG
-        (int) cbhg_proj_chans: the number of channels of projection layer in CBHG
-        (int) cbhg_highway_layers: the number of layers of highway network in CBHG
-        (int) cbhg_highway_units: the number of units of highway network in CBHG
-        (int) cbhg_gru_units: the number of units of GRU in CBHG
     """
 
     def __init__(self, idim, odim, args):
@@ -261,19 +219,6 @@ class Tacotron2(torch.nn.Module):
         self.use_concate = args.use_concate
         self.dropout = args.dropout
         self.zoneout = args.zoneout
-        self.reduction_factor = args.reduction_factor
-        self.atype = args.atype
-        self.use_cbhg = args.use_cbhg
-        if self.use_cbhg:
-            self.spc_dim = args.spc_dim
-            self.cbhg_conv_bank_layers = args.cbhg_conv_bank_layers
-            self.cbhg_conv_bank_chans = args.cbhg_conv_bank_chans
-            self.cbhg_conv_proj_filts = args.cbhg_conv_proj_filts
-            self.cbhg_conv_proj_chans = args.cbhg_conv_proj_chans
-            self.cbhg_highway_layers = args.cbhg_highway_layers
-            self.cbhg_highway_units = args.cbhg_highway_units
-            self.cbhg_gru_units = args.cbhg_gru_units
-
         # define activation function for the final output
         if args.output_activation is None:
             self.output_activation_fn = None
@@ -292,36 +237,14 @@ class Tacotron2(torch.nn.Module):
                            use_batch_norm=self.use_batch_norm,
                            dropout=self.dropout)
         dec_idim = self.eunits if self.spk_embed_dim is None else self.eunits + self.spk_embed_dim
-        if self.atype == "location":
-            att = AttLoc(dec_idim,
-                         self.dunits,
-                         self.adim,
-                         self.aconv_chans,
-                         self.aconv_filts)
-        elif self.atype == "forward":
-            att = AttForward(dec_idim,
-                             self.dunits,
-                             self.adim,
-                             self.aconv_chans,
-                             self.aconv_filts)
-            if self.cumulate_att_w:
-                logging.warn("cumulation of attention weights is disabled in forward attention.")
-                self.cumulate_att_w = False
-        elif self.atype == "forward_ta":
-            att = AttForwardTA(dec_idim,
+        self.dec = Decoder(idim=dec_idim,
+                           odim=self.odim,
+                           att=AttLoc(
+                               dec_idim,
                                self.dunits,
                                self.adim,
                                self.aconv_chans,
-                               self.aconv_filts,
-                               self.odim)
-            if self.cumulate_att_w:
-                logging.warn("cumulation of attention weights is disabled in forward attention.")
-                self.cumulate_att_w = False
-        else:
-            raise NotImplementedError("Support only location or forward")
-        self.dec = Decoder(idim=dec_idim,
-                           odim=self.odim,
-                           att=att,
+                               self.aconv_filts),
                            dlayers=self.dlayers,
                            dunits=self.dunits,
                            prenet_layers=self.prenet_layers,
@@ -334,24 +257,12 @@ class Tacotron2(torch.nn.Module):
                            use_batch_norm=self.use_batch_norm,
                            use_concate=self.use_concate,
                            dropout=self.dropout,
-                           zoneout=self.zoneout,
-                           reduction_factor=self.reduction_factor)
-        if self.use_cbhg:
-            self.cbhg = CBHG(idim=self.odim,
-                             odim=self.spc_dim,
-                             conv_bank_layers=self.cbhg_conv_bank_layers,
-                             conv_bank_chans=self.cbhg_conv_bank_chans,
-                             conv_proj_filts=self.cbhg_conv_proj_filts,
-                             conv_proj_chans=self.cbhg_conv_proj_chans,
-                             highway_layers=self.cbhg_highway_layers,
-                             highway_units=self.cbhg_highway_units,
-                             gru_units=self.cbhg_gru_units)
-
+                           zoneout=self.zoneout)
         # initialize
         self.enc.apply(encoder_init)
         self.dec.apply(decoder_init)
 
-    def forward(self, xs, ilens, ys, olens=None, spembs=None):
+    def forward(self, xs, ilens, ys, spembs=None):
         """TACOTRON2 FORWARD CALCULATION
 
         :param torch.Tensor xs: batch of padded character ids (B, Tmax)
@@ -377,13 +288,7 @@ class Tacotron2(torch.nn.Module):
             hs = torch.cat([hs, spembs], dim=-1)
         after_outs, before_outs, logits = self.dec(hs, hlens, ys)
 
-        if self.use_cbhg:
-            if self.reduction_factor > 1:
-                olens = olens.new([olen - olen % self.reduction_factor for olen in olens])
-            cbhg_outs, _ = self.cbhg(after_outs, olens)
-            return cbhg_outs, after_outs, before_outs, logits
-        else:
-            return after_outs, before_outs, logits
+        return after_outs, before_outs, logits
 
     def inference(self, x, inference_args, spemb=None):
         """GENERATE THE SEQUENCE OF FEATURES FROM THE SEQUENCE OF CHARACTERS
@@ -413,11 +318,7 @@ class Tacotron2(torch.nn.Module):
             h = torch.cat([h, spemb], dim=-1)
         outs, probs, att_ws = self.dec.inference(h, threshold, minlenratio, maxlenratio)
 
-        if self.use_cbhg:
-            cbhg_outs = self.cbhg.inference(outs)
-            return cbhg_outs, probs, att_ws
-        else:
-            return outs, probs, att_ws
+        return outs, probs, att_ws
 
     def calculate_all_attentions(self, xs, ilens, ys, spembs=None):
         """TACOTRON2 FORWARD CALCULATION
@@ -522,6 +423,8 @@ class Encoder(torch.nn.Module):
         :return: batch of lenghts of each encoder states (B)
         :rtype: list
         """
+        if not isinstance(ilens, list):
+            ilens = list(map(int, ilens))
         xs = self.embed(xs).transpose(1, 2)
         for l in six.moves.range(self.econv_layers):
             if self.use_residual:
@@ -533,7 +436,7 @@ class Encoder(torch.nn.Module):
         xs, _ = self.blstm(xs)  # (B, Tmax, C)
         xs, hlens = pad_packed_sequence(xs, batch_first=True)
 
-        return xs, hlens
+        return xs, list(map(int, hlens))
 
     def inference(self, x):
         """CHARACTER ENCODER INFERENCE
@@ -572,7 +475,6 @@ class Decoder(torch.nn.Module):
     :param bool use_concate: whether to concatenate encoder embedding with decoder lstm outputs
     :param float dropout: dropout rate
     :param float zoneout: zoneout rate
-    :param int reduction_factor: reduction factor
     :param float threshold: threshold in inference
     :param float minlenratio: minimum length ratio in inference
     :param float maxlenratio: maximum length ratio in inference
@@ -593,7 +495,6 @@ class Decoder(torch.nn.Module):
                  dropout=0.5,
                  zoneout=0.1,
                  threshold=0.5,
-                 reduction_factor=1,
                  maxlenratio=5.0,
                  minlenratio=0.0):
         super(Decoder, self).__init__()
@@ -614,15 +515,9 @@ class Decoder(torch.nn.Module):
         self.use_concate = use_concate
         self.dropout = dropout
         self.zoneout = zoneout
-        self.reduction_factor = reduction_factor
         self.threshold = threshold
         self.maxlenratio = maxlenratio
         self.minlenratio = minlenratio
-        # check attention type
-        if isinstance(self.att, AttForwardTA):
-            self.use_att_extra_inputs = True
-        else:
-            self.use_att_extra_inputs = False
         # define lstm network
         self.lstm = torch.nn.ModuleList()
         for layer in six.moves.range(self.dlayers):
@@ -676,19 +571,20 @@ class Decoder(torch.nn.Module):
             self.postnet = None
         # define projection layers
         iunits = self.idim + self.dunits if self.use_concate else self.dunits
-        self.feat_out = torch.nn.Linear(iunits, self.odim * self.reduction_factor, bias=False)
-        self.prob_out = torch.nn.Linear(iunits, self.reduction_factor)
+        self.feat_out = torch.nn.Linear(iunits, self.odim, bias=False)
+        self.prob_out = torch.nn.Linear(iunits, 1)
 
     def zero_state(self, hs):
         init_hs = hs.new_zeros(hs.size(0), self.dunits)
         return init_hs
 
-    def forward(self, hs, hlens, ys):
+    def forward(self, hs, hlens, ys, att_w_maxlen=None):
         """DECODER FORWARD CALCULATION
 
         :param torch.Tensor hs: batch of the sequences of padded hidden states (B, Tmax, idim)
         :param list hlens: list of lengths of each input batch (B)
         :param torch.Tensor ys: batch of the sequences of padded target features (B, Lmax, odim)
+        :param int att_w_maxlen: maximum length of att_w (only for dataparallel)
         :return: outputs with postnets (B, Lmax, odim)
         :rtype: torch.Tensor
         :return: outputs without postnets (B, Lmax, odim)
@@ -698,13 +594,6 @@ class Decoder(torch.nn.Module):
         :return: attetion weights (B, Lmax, Tmax)
         :rtype: torch.Tensor
         """
-        # thin out frames (B, Lmax, odim) ->  (B, Lmax/r, odim)
-        if self.reduction_factor > 1:
-            ys = ys[:, self.reduction_factor - 1::self.reduction_factor]
-
-        # length list should be list of int
-        hlens = list(map(int, hlens))
-
         # initialize hidden states of decoder
         c_list = [self.zero_state(hs)]
         z_list = [self.zero_state(hs)]
@@ -720,10 +609,7 @@ class Decoder(torch.nn.Module):
         # loop for an output sequence
         outs, logits = [], []
         for y in ys.transpose(0, 1):
-            if self.use_att_extra_inputs:
-                att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w, prev_out)
-            else:
-                att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w)
+            att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w)
             prenet_out = self._prenet_forward(prev_out)
             xs = torch.cat([att_c, prenet_out], dim=1)
             z_list[0], c_list[0] = self.lstm[0](xs, (z_list[0], c_list[0]))
@@ -731,7 +617,7 @@ class Decoder(torch.nn.Module):
                 z_list[l], c_list[l] = self.lstm[l](
                     z_list[l - 1], (z_list[l], c_list[l]))
             zcs = torch.cat([z_list[-1], att_c], dim=1) if self.use_concate else z_list[-1]
-            outs += [self.feat_out(zcs).view(hs.size(0), self.odim, -1)]
+            outs += [self.feat_out(zcs)]
             logits += [self.prob_out(zcs)]
             prev_out = y  # teacher forcing
             if self.cumulate_att_w and prev_att_w is not None:
@@ -740,15 +626,10 @@ class Decoder(torch.nn.Module):
                 prev_att_w = att_w
 
         logits = torch.cat(logits, dim=1)  # (B, Lmax)
-        before_outs = torch.cat(outs, dim=2)  # (B, odim, Lmax)
-
-        if self.reduction_factor > 1:
-            before_outs = before_outs.view(before_outs.size(0), self.odim, -1)  # (B, odim, Lmax)
-
+        before_outs = torch.stack(outs, dim=2)  # (B, odim, Lmax)
         after_outs = before_outs + self._postnet_forward(before_outs)  # (B, odim, Lmax)
         before_outs = before_outs.transpose(2, 1)  # (B, Lmax, odim)
         after_outs = after_outs.transpose(2, 1)  # (B, Lmax, odim)
-        logits = logits
 
         # apply activation function for scaling
         if self.output_activation_fn is not None:
@@ -795,13 +676,10 @@ class Decoder(torch.nn.Module):
         outs, att_ws, probs = [], [], []
         while True:
             # updated index
-            idx += self.reduction_factor
+            idx += 1
 
             # decoder calculation
-            if self.use_att_extra_inputs:
-                att_c, att_w = self.att(hs, ilens, z_list[0], prev_att_w, prev_out)
-            else:
-                att_c, att_w = self.att(hs, ilens, z_list[0], prev_att_w)
+            att_c, att_w = self.att(hs, ilens, z_list[0], prev_att_w)
             att_ws += [att_w]
             prenet_out = self._prenet_forward(prev_out)
             xs = torch.cat([att_c, prenet_out], dim=1)
@@ -810,31 +688,25 @@ class Decoder(torch.nn.Module):
                 z_list[l], c_list[l] = self.lstm[l](
                     z_list[l - 1], (z_list[l], c_list[l]))
             zcs = torch.cat([z_list[-1], att_c], dim=1) if self.use_concate else z_list[-1]
-            outs += [self.feat_out(zcs).view(1, self.odim, -1)]  # [(1, odim, r), ...]
-            probs += [torch.sigmoid(self.prob_out(zcs))[0]]  # [(r), ...]
             if self.output_activation_fn is not None:
-                prev_out = self.output_activation_fn(outs[-1][:, :, -1])  # (1, odim)
+                outs += [self.output_activation_fn(self.feat_out(zcs))]
             else:
-                prev_out = outs[-1][:, :, -1]  # (1, odim)
+                outs += [self.feat_out(zcs)]
+            probs += [torch.sigmoid(self.prob_out(zcs))[0]]
+            prev_out = outs[-1]
             if self.cumulate_att_w and prev_att_w is not None:
                 prev_att_w = prev_att_w + att_w  # Note: error when use +=
             else:
                 prev_att_w = att_w
 
             # check whether to finish generation
-            if int(sum(probs[-1] >= threshold)) > 0 or idx >= maxlen:
-                # check mininum length
-                if idx < minlen:
-                    continue
-                outs = torch.cat(outs, dim=2)  # (1, odim, L)
+            if (int(probs[-1] >= threshold) and idx >= minlen) or idx == maxlen:
+                outs = torch.stack(outs, dim=2)  # (1, odim, L)
                 outs = outs + self._postnet_forward(outs)  # (1, odim, L)
-                outs = outs.transpose(2, 1).squeeze(0)  # (L, odim)
+                outs = outs.transpose(2, 1).squeeze(0)  # (Lx, odim)
                 probs = torch.cat(probs, dim=0)
                 att_ws = torch.cat(att_ws, dim=0)
                 break
-
-        if self.output_activation_fn is not None:
-            outs = self.output_activation_fn(outs)
 
         return outs, probs, att_ws
 
@@ -847,9 +719,6 @@ class Decoder(torch.nn.Module):
         :return: attetion weights (B, Lmax, Tmax)
         :rtype: numpy array
         """
-        # length list should be list of int
-        hlens = list(map(int, hlens))
-
         # initialize hidden states of decoder
         c_list = [self.zero_state(hs)]
         z_list = [self.zero_state(hs)]
@@ -865,10 +734,7 @@ class Decoder(torch.nn.Module):
         # loop for an output sequence
         att_ws = []
         for y in ys.transpose(0, 1):
-            if self.use_att_extra_inputs:
-                att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w, prev_out)
-            else:
-                att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w)
+            att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w)
             att_ws += [att_w]
             prenet_out = self._prenet_forward(prev_out)
             xs = torch.cat([att_c, prenet_out], dim=1)
@@ -897,173 +763,3 @@ class Decoder(torch.nn.Module):
             for l in six.moves.range(self.postnet_layers):
                 xs = self.postnet[l](xs)
         return xs
-
-
-class CBHG(torch.nn.Module):
-    """CBHG MODULE TO CONVERT LOG MEL-FBANK TO LINEAR SPECTROGRAM
-
-    :param int idim: dimension of the inputs
-    :param int odim: dimension of the outputs
-    :param int conv_bank_layers: the number of convolution bank layers
-    :param int conv_bank_chans: the number of channels in convolution bank
-    :param int conv_proj_filts: kernel size of convolutional projection layer
-    :param int conv_proj_chans: the number of channels in convolutional projection layer
-    :param int highway_layers: the number of highway network layers
-    :param int highway_units: the number of highway network units
-    :param int gru_units: the number of GRU units (for both directions)
-    """
-
-    def __init__(self,
-                 idim,
-                 odim,
-                 conv_bank_layers=8,
-                 conv_bank_chans=128,
-                 conv_proj_filts=3,
-                 conv_proj_chans=256,
-                 highway_layers=4,
-                 highway_units=128,
-                 gru_units=256):
-        super(CBHG, self).__init__()
-        self.idim = idim
-        self.odim = odim
-        self.conv_bank_layers = conv_bank_layers
-        self.conv_bank_chans = conv_bank_chans
-        self.conv_proj_filts = conv_proj_filts
-        self.conv_proj_chans = conv_proj_chans
-        self.highway_layers = highway_layers
-        self.highway_units = highway_units
-        self.gru_units = gru_units
-
-        # define 1d convolution bank
-        self.conv_bank = torch.nn.ModuleList()
-        for k in range(1, self.conv_bank_layers + 1):
-            if k % 2 != 0:
-                padding = (k - 1) // 2
-            else:
-                padding = ((k - 1) // 2, (k - 1) // 2 + 1)
-            self.conv_bank += [torch.nn.Sequential(
-                torch.nn.ConstantPad1d(padding, 0.0),
-                torch.nn.Conv1d(idim, self.conv_bank_chans, k, stride=1,
-                                padding=0, bias=True),
-                torch.nn.BatchNorm1d(self.conv_bank_chans),
-                torch.nn.ReLU())]
-
-        # define max pooling (need padding for one-side to keep same length)
-        self.max_pool = torch.nn.Sequential(
-            torch.nn.ConstantPad1d((0, 1), 0.0),
-            torch.nn.MaxPool1d(2, stride=1))
-
-        # define 1d convolution projection
-        self.projections = torch.nn.Sequential(
-            torch.nn.Conv1d(self.conv_bank_chans * self.conv_bank_layers, self.conv_proj_chans,
-                            self.conv_proj_filts, stride=1,
-                            padding=(self.conv_proj_filts - 1) // 2, bias=True),
-            torch.nn.BatchNorm1d(self.conv_proj_chans),
-            torch.nn.ReLU(),
-            torch.nn.Conv1d(self.conv_proj_chans, self.idim,
-                            self.conv_proj_filts, stride=1,
-                            padding=(self.conv_proj_filts - 1) // 2, bias=True),
-            torch.nn.BatchNorm1d(self.idim),
-        )
-
-        # define highway network
-        self.highways = torch.nn.ModuleList()
-        self.highways += [torch.nn.Linear(idim, self.highway_units)]
-        for _ in range(self.highway_layers):
-            self.highways += [HighwayNet(self.highway_units)]
-
-        # define bidirectional GRU
-        self.gru = torch.nn.GRU(self.highway_units, gru_units // 2, num_layers=1,
-                                batch_first=True, bidirectional=True)
-
-        # define final projection
-        self.output = torch.nn.Linear(gru_units, odim, bias=True)
-
-    def forward(self, xs, ilens):
-        """CBHG MODULE FORWARD
-
-        :param torch.Tensor xs: batch of the sequences of inputs (B, Tmax, idim)
-        :param torch.Tensor ilens: list of lengths of each input batch (B)
-        :return: batch of sequences of padded outputs (B, Tmax, eunits)
-        :rtype: torch.Tensor
-        :return: batch of lenghts of each encoder states (B)
-        :rtype: list
-        """
-        xs = xs.transpose(1, 2)  # (B, idim, Tmax)
-        convs = []
-        for k in range(self.conv_bank_layers):
-            convs += [self.conv_bank[k](xs)]
-        convs = torch.cat(convs, dim=1)  # (B, #CH * #BANK, Tmax)
-        convs = self.max_pool(convs)
-        convs = self.projections(convs).transpose(1, 2)  # (B, Tmax, idim)
-        xs = xs.transpose(1, 2) + convs
-        # + 1 for dimension adjustment layer
-        for l in range(self.highway_layers + 1):
-            xs = self.highways[l](xs)
-
-        # sort by length
-        xs, ilens, sort_idx = self._sort_by_length(xs, ilens)
-
-        # total_length needs for DataParallel
-        # (see https://github.com/pytorch/pytorch/pull/6327)
-        total_length = xs.size(1)
-        xs = pack_padded_sequence(xs, ilens, batch_first=True)
-        self.gru.flatten_parameters()
-        xs, _ = self.gru(xs)
-        xs, ilens = pad_packed_sequence(xs, batch_first=True, total_length=total_length)
-
-        # revert sorting by length
-        xs, ilens = self._revert_sort_by_length(xs, ilens, sort_idx)
-
-        xs = self.output(xs)  # (B, Tmax, odim)
-
-        return xs, ilens
-
-    def inference(self, x):
-        """CBHG MODULE INFERENCE
-
-        :param torch.Tensor x: input (T, idim)
-        :return: the sequence encoder states (T, odim)
-        :rtype: torch.Tensor
-        """
-        assert len(x.size()) == 2
-        xs = x.unsqueeze(0)
-        ilens = x.new([x.size(0)]).long()
-
-        return self.forward(xs, ilens)[0][0]
-
-    def _sort_by_length(self, xs, ilens):
-        sort_ilens, sort_idx = ilens.sort(0, descending=True)
-        return xs[sort_idx], ilens[sort_idx], sort_idx
-
-    def _revert_sort_by_length(self, xs, ilens, sort_idx):
-        _, revert_idx = sort_idx.sort(0)
-        return xs[revert_idx], ilens[revert_idx]
-
-
-class HighwayNet(torch.nn.Module):
-    """HIGHWAY NETWORK
-
-    :param int idim: dimension of the inputs
-    """
-
-    def __init__(self, idim):
-        super(HighwayNet, self).__init__()
-        self.idim = idim
-        self.projection = torch.nn.Sequential(
-            torch.nn.Linear(idim, idim),
-            torch.nn.ReLU())
-        self.gate = torch.nn.Sequential(
-            torch.nn.Linear(idim, idim),
-            torch.nn.Sigmoid())
-
-    def forward(self, x):
-        """HIGHWAY NETWORK FORWARD
-
-        :param torch.Tensor xs: batch of inputs (B, *, idim)
-        :return: batch of outputs (B, *, idim)
-        :rtype: torch.Tensor
-        """
-        proj = self.projection(x)
-        gate = self.gate(x)
-        return proj * gate + x * (1.0 - gate)

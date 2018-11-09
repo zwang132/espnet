@@ -55,13 +55,11 @@ def main():
                         help='Shift length in point')
     parser.add_argument('--win_length', type=int, default=None, nargs='?',
                         help='Analisys window length in point')
-    parser.add_argument('--n_mels', type=int, default=None, nargs='?',
+    parser.add_argument('--n_mels', type=int, default=80,
                         help='Number of mel basis')
     parser.add_argument('--window', type=str, default='hann',
                         choices=['hann', 'hamming'],
                         help='Type of window')
-    parser.add_argument('--iters', type=int, default=100,
-                        help='Number of iterations in Grriffin Lim')
     parser.add_argument('scp', type=str,
                         help='Feat scp files')
     parser.add_argument('outdir', type=str,
@@ -82,23 +80,19 @@ def main():
 
     # extract feature and then write as ark with scp format
     for idx, (utt_id, lmspc) in enumerate(reader, 1):
-        if args.n_mels is not None:
-            spc = logmelspc_to_linearspc(
-                lmspc,
-                fs=args.fs,
-                n_mels=args.n_mels,
-                n_fft=args.n_fft,
-                fmin=args.fmin,
-                fmax=args.fmax)
-        else:
-            spc = lmspc
+        spc = logmelspc_to_linearspc(
+            lmspc,
+            fs=args.fs,
+            n_mels=args.n_mels,
+            n_fft=args.n_fft,
+            fmin=args.fmin,
+            fmax=args.fmax)
         y = griffin_lim(
             spc,
             n_fft=args.n_fft,
             n_shift=args.n_shift,
             win_length=args.win_length,
-            window=args.window,
-            iters=args.iters)
+            window=args.window)
         logging.info("(%d) %s" % (idx, utt_id))
         write(args.outdir + "/%s.wav" % utt_id,
               args.fs,
