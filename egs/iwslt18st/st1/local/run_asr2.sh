@@ -22,12 +22,12 @@ do_delta=false
 # network archtecture
 # encoder related
 etype=vggblstm     # encoder architecture type
-elayers=5
+elayers=3
 eunits=1024
 eprojs=1024
 subsample=1_2_2_1_1 # skip every n frame from input to nth layers
 # decoder related
-dlayers=2
+dlayers=1
 dunits=1024
 # attention related
 atype=location
@@ -39,7 +39,7 @@ aconv_filts=100
 mtlalpha=0.5
 
 # minibatch related
-batchsize=25
+batchsize=16
 maxlen_in=800  # if input length  > maxlen_in, batchsize is automatically reduced
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
