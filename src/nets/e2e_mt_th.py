@@ -565,14 +565,14 @@ class Decoder(torch.nn.Module):
         ctc_weight = recog_args.ctc_weight
 
         # preprate sos
-        if recog_args.sos:
-            logging.info('sos index: ' + str(char_list.index(recog_args.sos)))
-            logging.info('sos mark: ' + recog_args.sos)
-            y = char_list.index(recog_args.sos)
-        else:
-            logging.info('sos index: ' + str(self.sos))
-            logging.info('sos mark: ' + char_list[self.sos])
-            y = self.sos
+        #if recog_args.sos:
+        #    logging.info('sos index: ' + str(char_list.index(recog_args.sos)))
+        #    logging.info('sos mark: ' + recog_args.sos)
+        #    y = char_list.index(recog_args.sos)
+        #else:
+        logging.info('sos index: ' + str(self.sos))
+        logging.info('sos mark: ' + char_list[self.sos])
+        y = self.sos
         vy = h.new_zeros(1).long()
 
         if recog_args.maxlenratio == 0:
