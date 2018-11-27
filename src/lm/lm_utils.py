@@ -17,6 +17,7 @@ import random
 import six
 
 from chainer.training import extension
+import torch
 
 
 def read_tokens(filename, label_dict):
@@ -70,7 +71,7 @@ def compute_perplexity(result):
 def negate_gradient(parameters, error_weight):
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, paramters))
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
     for p in parameters:
         p.grad.data.mul_(error_weight)
 
@@ -159,6 +160,10 @@ class ParallelSentenceIterator(chainer.dataset.Iterator):
         if self._previous_epoch_detail < 0:
             return None
         return self._previous_epoch_detail
+
+    @property
+    def iteration_detail(self):
+        return self.iteration
 
     def serialize(self, serializer):
         # It is important to serialize the state to be recovered on resume.

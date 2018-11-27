@@ -52,10 +52,12 @@ def main():
     parser.add_argument('--opt', default='sgd', type=str,
                         choices=['sgd', 'adam'],
                         help='Optimizer')
+    parser.add_argument('--lr', default=1.0, type=float,
+                        help='Learning rate for normal optimizer(SGD)')
     parser.add_argument('--error-opt', default='sgd', type=str,
                         choices=['sgd', 'adam'],
                         help='Optimizer for error set')
-    parser.add_argument('--error-lr', default=0.1, type=float,
+    parser.add_argument('--error-lr', default=1.0, type=float,
                         help='Learning rate for error optimizer(SGD)')
     parser.add_argument('--batchsize', '-b', type=int, default=300,
                         help='Number of examples in each mini-batch')
@@ -71,6 +73,8 @@ def main():
                         help='Batch size is reduced if the input sequence > ML')
     parser.add_argument('--error-weight', type=float, default=-0.1,
                         help='Weight of loss from error sentences')
+    parser.add_argument('--shuffle', type=bool, default=True,
+                        help='Whether shuffle some of the training oder with error batch')
     args = parser.parse_args()
 
     # logging info
