@@ -37,7 +37,7 @@ aconv_filts=100
 
 # regularization related
 samp_prob=0
-dropout=0
+dropout=0.1
 
 # input feeding option
 input_feeding=true
@@ -71,7 +71,7 @@ datadir=/export/b08/inaguma/IWSLT
 
 
 # bpemode (unigram or bpe)
-nbpe=5000
+nbpe=2000
 bpemode=unigram
 
 
@@ -288,10 +288,8 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs} \
         --input-feeding ${input_feeding} \
-        --rnnlm-cf ${lmexpdir}/rnnlm.model.best \
-        --cold-fusion ${cold_fusion}
 fi
-
+echo "Stage 4" && exit 1
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32

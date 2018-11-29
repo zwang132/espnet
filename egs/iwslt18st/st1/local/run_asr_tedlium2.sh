@@ -65,7 +65,7 @@ datadir=/export/b08/inaguma/IWSLT
 
 
 # bpemode (unigram or bpe)
-nbpe=5000
+nbpe=2000
 bpemode=unigram
 
 
@@ -268,7 +268,7 @@ if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32
 
-    for rtask in ${recog_set_iwslt18} ${recog_set_tedlium2} ${eval_set}; do
+    for rtask in ${recog_set_iwslt18}; do
     (
         decode_dir=decode_${rtask}_beam${beam_size}_e${recog_model}_p${penalty}_len${minlenratio}-${maxlenratio}_ctcw${ctc_weight}_rnnlm${lm_weight}
         mkdir -p ${expdir}/${decode_dir}
@@ -294,7 +294,6 @@ if [ ${stage} -le 5 ]; then
             --maxlenratio ${maxlenratio} \
             --minlenratio ${minlenratio} \
             --ctc-weight ${ctc_weight} \
-            --rnnlm ${lmexpdir}/rnnlm.model.best \
             --lm-weight ${lm_weight} \
             &
         wait

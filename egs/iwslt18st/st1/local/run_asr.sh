@@ -22,12 +22,12 @@ do_delta=false
 # network archtecture
 # encoder related
 etype=vggblstm     # encoder architecture type
-elayers=3
+elayers=5
 eunits=1024
 eprojs=1024
 subsample=1_2_2_1_1 # skip every n frame from input to nth layers
 # decoder related
-dlayers=1
+dlayers=2
 dunits=1024
 # attention related
 atype=location
@@ -45,7 +45,7 @@ maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduc
 
 # optimization related
 opt=adadelta
-epochs=15
+epochs=10
 
 # rnnlm related
 lm_weight=0.3
@@ -65,7 +65,7 @@ datadir=/export/b08/inaguma/IWSLT
 
 
 # bpemode (unigram or bpe)
-nbpe=10000
+nbpe=2000
 bpemode=unigram
 
 
@@ -152,12 +152,12 @@ if [ ${stage} -le 1 ]; then
     # dump features for training
     if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d ${feat_tr_dir}/storage ]; then
       utils/create_split_dir.pl \
-          /export/b{14,15,16}/${USER}/espnet-data/egs/iwslt18st/asr1_MT/dump/${train_set}/delta${do_delta}/storage \
+          /export/b{14,15,16}/${USER}/espnet-data/egs/iwslt18st/asr1_MT_noreseg/dump/${train_set}/delta${do_delta}/storage \
           ${feat_tr_dir}/storage
     fi
     if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d ${feat_dt_dir}/storage ]; then
       utils/create_split_dir.pl \
-          /export/b{14,15,16}/${USER}/espnet-data/egs/iwslt18st/asr1_MT/dump/${train_dev}/delta${do_delta}/storage \
+          /export/b{14,15,16}/${USER}/espnet-data/egs/iwslt18st/asr1_MT_noreseg/dump/${train_dev}/delta${do_delta}/storage \
           ${feat_dt_dir}/storage
     fi
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
@@ -276,12 +276,12 @@ if [ ${stage} -le 4 ]; then
         --opt ${opt} \
         --epochs ${epochs}
 fi
-echo "Stage 4" && exit 1
+
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32
 
-    for rtask in ${recog_set} ${eval_set}; do
+    for rtask in tst2015.en; do
     (
         decode_dir=decode_${rtask}_beam${beam_size}_e${recog_model}_p${penalty}_len${minlenratio}-${maxlenratio}_ctcw${ctc_weight}_rnnlm${lm_weight}
         mkdir -p ${expdir}/${decode_dir}
@@ -305,7 +305,6 @@ if [ ${stage} -le 5 ]; then
             --maxlenratio ${maxlenratio} \
             --minlenratio ${minlenratio} \
             --ctc-weight ${ctc_weight} \
-            --rnnlm ${lmexpdir}/rnnlm.model.best \
             --lm-weight ${lm_weight} \
             &
         wait

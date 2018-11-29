@@ -8,8 +8,8 @@
 
 # general configuration
 backend=pytorch
-stage=-1       # start from -1 if you need to start from data download
-ngpu=0         # number of gpus ("0" uses cpu, otherwise use gpu)
+stage=1        # start from -1 if you need to start from data download
+ngpu=1         # number of gpus ("0" uses cpu, otherwise use gpu)
 debugmode=1
 dumpdir=dump   # directory to dump full features
 N=0            # number of minibatches to be used (mainly for debugging). "0" uses all minibatches.
@@ -35,9 +35,12 @@ adim=1024
 aconv_chans=10
 aconv_filts=100
 
+lsm_weight=0
+eps_decay=0.01
+
 # regularization related
 samp_prob=0
-dropout=0
+dropout=0.1
 
 # input feeding option
 input_feeding=true
@@ -71,7 +74,7 @@ datadir=/export/b08/inaguma/IWSLT
 
 
 # bpemode (unigram or bpe)
-nbpe=5000
+nbpe=2000
 bpemode=unigram
 
 
@@ -143,7 +146,7 @@ if [ ${stage} -le 1 ]; then
         cut -f -1 -d " " data/${x}.en.tmp/segments > data/${x}.de.tmp/reclist2
         comm -12 data/${x}.de.tmp/reclist1 data/${x}.de.tmp/reclist2 > data/${x}.de.tmp/reclist
 
-        new_data_dir=data/`echo ${x} | cut -f -1 -d "."`
+        new_data_dir=data/`echo ${x} | cut -f -1 -d "_"`
         for lang in de en; do
           reduce_data_dir.sh data/${x}.${lang}.tmp data/${x}.de.tmp/reclist ${new_data_dir}.${lang}
           utils/fix_data_dir.sh ${new_data_dir}.${lang}
@@ -165,11 +168,11 @@ if [ ${stage} -le 1 ]; then
     #       /export/b{14,15,16,17}/${USER}/espnet-data/egs/iwslt18st/asr1/dump/${train_dev}/delta${do_delta}/storage \
     #       ${feat_dt_dir}/storage
     # fi
-    dump.sh --cmd "$train_cmd" --nj 80 --do_delta $do_delta \
+    dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
         data/${train_set}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/${train_set} ${feat_tr_dir}
     dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
         data/${train_dev}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/${train_dev} ${feat_dt_dir}
-    for rtask in ${recog_set} ${eval_set}; do
+    for rtask in ${recog_set}; do
         feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}; mkdir -p ${feat_recog_dir}
         dump.sh --cmd "$train_cmd" --nj 32 --do_delta $do_delta \
             data/${rtask}/feats.scp data/${train_set}/cmvn.ark exp/dump_feats/recog/${rtask} \
@@ -221,7 +224,6 @@ if [ ${stage} -le 2 ]; then
         local/update_json.sh --text ${data_dir}/text_noseg --bpecode ${bpemodel}.model ${feat_dir}/data_${bpemode}${nbpe}_mt.json ${data_dir} ${dict}
     done
 fi
-
 
 # You can skip this and remove --rnnlm option in the recognition (stage 3)
 lmexpdir=exp/${train_set}_rnnlm_${backend}_2layer_bs256_${bpemode}${nbpe}
@@ -304,17 +306,15 @@ if [ ${stage} -le 4 ]; then
         --maxlen-in ${maxlen_in} \
         --maxlen-out ${maxlen_out} \
         --sampling-probability ${samp_prob} \
-        --lsm-type ${lsm_type} \
-        --lsm-weight ${lsm_weight} \
         --dropout-rate ${dropout} \
         --opt ${opt} \
         --epochs ${epochs} \
         --eps-decay ${eps_decay} \
-        --input-feeding ${input_feeding} \
-        --rnnlm-cf ${lmexpdir}/rnnlm.model.best \
-        --cold-fusion ${cold_fusion}
+        --input-feeding ${input_feeding}
 fi
-
+#        --rnnlm-cf ${lmexpdir}/rnnlm.model.best \
+#        --cold-fusion ${cold_fusion}
+echo "Stage 4" && exit 1
 if [ ${stage} -le 5 ]; then
     echo "stage 5: Decoding"
     nj=32

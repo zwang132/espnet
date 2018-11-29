@@ -13,6 +13,7 @@ egs/*/*/db
 egs/*/*/downloads
 egs/*/*/dump
 egs/*/*/exp
+egs/*/*/mt_exp*
 egs/*/*/fbank
 egs/*/*/mfcc
 egs/*/*/stft
